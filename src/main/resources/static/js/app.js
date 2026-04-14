@@ -67,6 +67,39 @@ function responseViewer(res, label = 'Response') {
     </div>`;
 }
 
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function requestViewer(method, url, headers = {}, body = null) {
+  if (!method) {
+    return `<div class="response-viewer">
+      <div class="response-header"><span class="response-label">Request</span></div>
+      <div class="response-body"><span class="response-placeholder">Hit a button to see the request here</span></div>
+    </div>`;
+  }
+  const lines = [];
+  lines.push(`<span class="method-${method.toLowerCase()}">${method}</span> <span class="json-string">${escHtml(url)}</span>`);
+  for (const [k, v] of Object.entries(headers)) {
+    const disp = (k === 'Authorization' && String(v).length > 52) ? String(v).slice(0,42)+'…' : v;
+    lines.push(`<span class="req-key">${escHtml(k)}:</span> <span class="req-val">${escHtml(disp)}</span>`);
+  }
+  if (body !== null) {
+    lines.push('');
+    try {
+      const p = typeof body === 'string' ? JSON.parse(body) : body;
+      lines.push(syntaxHighlight(p));
+    } catch { lines.push(escHtml(String(body))); }
+  }
+  return `<div class="response-viewer">
+    <div class="response-header">
+      <span class="response-label">Request</span>
+      <span class="method-badge method-${method.toLowerCase()}">${method}</span>
+    </div>
+    <div class="response-body">${lines.join('\n')}</div>
+  </div>`;
+}
+
 function b64decode(str) {
   try { return JSON.parse(atob(str.replace(/-/g, '+').replace(/_/g, '/'))); } catch { return null; }
 }
@@ -205,20 +238,28 @@ const handlers = {
       body: JSON.stringify({ username: user, password: pass })
     });
     setLoading(btn, false);
+    const reqView = requestViewer('POST', '/api/auth/login',
+      { 'Content-Type': 'application/json' },
+      { username: user, password: '●●●●●●●●' });
     if (res.ok) {
       State.jwt = res.body.accessToken;
       State.username = user;
       // Re-render the whole page so conditional elements (Decode, Clear, Protected buttons)
       // all appear correctly based on the updated State.jwt
       render();
+      setHtml('jwt-login-request', reqView);
       setHtml('jwt-login-response', responseViewer(res, 'POST /api/auth/login'));
     } else {
+      setHtml('jwt-login-request', reqView);
       setHtml('jwt-login-response', responseViewer(res, 'POST /api/auth/login'));
     }
   },
 
   async jwtProtected() {
+    const headers = {};
+    if (State.jwt) headers['Authorization'] = `Bearer ${State.jwt}`;
     const res = await apiFetch('/api/jwt/protected');
+    setHtml('jwt-protected-request', requestViewer('GET', '/api/jwt/protected', headers));
     setHtml('jwt-protected-response', responseViewer(res, 'GET /api/jwt/protected'));
   },
 
@@ -249,6 +290,7 @@ const handlers = {
       headers: { Authorization: `Basic ${creds}` }
     });
     setLoading(btn, false);
+    setHtml('basic-request', requestViewer('GET', endpoint, { Authorization: `Basic ${creds}` }));
     setHtml('basic-response', responseViewer(res, `GET ${endpoint}`));
   },
 
@@ -262,6 +304,7 @@ const handlers = {
       headers: { 'X-API-Key': key }
     });
     setLoading(btn, false);
+    setHtml('apikey-request', requestViewer('GET', endpoint, { 'X-API-Key': key }));
     setHtml('apikey-response', responseViewer(res, `GET ${endpoint}`));
   },
 
@@ -278,10 +321,13 @@ const handlers = {
       body: 'grant_type=client_credentials&scope=read'
     });
     setLoading(btn, false);
+    setHtml('oauth-token-request', requestViewer('POST', '/oauth2/token', {
+      'Authorization': `Basic ${creds}`,
+      'Content-Type': 'application/x-www-form-urlencoded'
+    }, 'grant_type=client_credentials&scope=read'));
     setHtml('oauth-token-response', responseViewer(res, 'POST /oauth2/token'));
     if (res.ok && res.body.access_token) {
       const token = res.body.access_token;
-      const parsed = parseJwt(token);
       setHtml('oauth-token-visual', `
         <div class="alert alert-success">OAuth2 token received! Using it to call the resource server...</div>
         ${jwtVisualizer(token)}
@@ -291,6 +337,7 @@ const handlers = {
         noJwt: true,
         headers: { Authorization: `Bearer ${token}` }
       });
+      setHtml('oauth-api-request', requestViewer('GET', '/api/oauth/data', { Authorization: `Bearer ${token}` }));
       setHtml('oauth-api-response', responseViewer(apiRes, 'GET /api/oauth/data (Resource Server)'));
     }
   },
@@ -313,7 +360,8 @@ const handlers = {
     });
     if (!loginRes.ok) {
       setLoading(btn, false);
-      setHtml('rbac-response', responseViewer(loginRes, 'Login'));
+      setHtml('rbac-request', requestViewer('POST', '/api/auth/login', {'Content-Type':'application/json'}, {username: role, password: '●●●●●●●●'}));
+      setHtml('rbac-response', responseViewer(loginRes, 'Login failed'));
       return;
     }
     const token = loginRes.body.accessToken;
@@ -322,6 +370,7 @@ const handlers = {
       headers: { Authorization: `Bearer ${token}` }
     });
     setLoading(btn, false);
+    setHtml('rbac-request', requestViewer('GET', endpoint, { Authorization: `Bearer ${token}` }));
     setHtml('rbac-response', `
       <div class="mb-8"><strong>Logged in as:</strong> <code>${role}</code>
         <span class="tag tag-purple ml-8">${loginRes.body.roles?.join(', ')}</span>
@@ -344,6 +393,7 @@ const handlers = {
     }
     if (!res.ok) State.rateBuckets[key] = 0;
     setHtml(`rate-${key}-meter`, tokenMeter(State.rateBuckets[key], parseInt(limit || 20), 'Token bucket'));
+    setHtml(`rate-${key}-request`, requestViewer('GET', endpoint, {}));
     setHtml(`rate-${key}-response`, responseViewer(res, `GET ${endpoint}`));
   },
 
@@ -358,6 +408,7 @@ const handlers = {
       if (remaining !== null && limit !== null) State.rateBuckets[key] = parseInt(remaining);
       if (!res.ok) State.rateBuckets[key] = 0;
       setHtml(`rate-${key}-meter`, tokenMeter(State.rateBuckets[key], parseInt(limit || 20), `Token bucket (request ${i+1}/10)`));
+      setHtml(`rate-${key}-request`, requestViewer('GET', endpoint, {}));
       setHtml(`rate-${key}-response`, responseViewer(res, `Request ${i+1}/10 → GET ${endpoint}`));
       await sleep(120);
     }
@@ -368,10 +419,10 @@ const handlers = {
   async cbSend(btn) {
     const fail = btn.dataset.fail === 'true';
     setLoading(btn, true);
-    const res = await apiFetch(`/api/timeout/unreliable?fail=${fail}`, { noJwt: true });
+    const url = `/api/timeout/unreliable?fail=${fail}`;
+    const res = await apiFetch(url, { noJwt: true });
     setLoading(btn, false);
 
-    const isOpen = res.body?.result?.startsWith?.('FALLBACK');
     const isFallback = typeof res.body?.result === 'string' && res.body.result.includes('FALLBACK');
 
     if (fail || !res.ok) State.cbFailures++;
@@ -388,7 +439,8 @@ const handlers = {
     else if (State.cbState === 'HALF_OPEN' && !fail) State.cbState = 'CLOSED';
 
     refreshCb(res);
-    setHtml('cb-response', responseViewer(res, `GET /api/timeout/unreliable?fail=${fail}`));
+    setHtml('cb-request', requestViewer('GET', url, {}));
+    setHtml('cb-response', responseViewer(res, `GET ${url}`));
   },
 
   cbReset() {
@@ -397,6 +449,7 @@ const handlers = {
     State.cbState = 'CLOSED';
     State.cbLog = [];
     refreshCb(null);
+    setHtml('cb-request', requestViewer(null));
     setHtml('cb-response', responseViewer(null));
   },
 
@@ -405,15 +458,17 @@ const handlers = {
     const delay = parseInt(val('timeout-delay') || '2');
     setLoading(btn, true);
     const start = Date.now();
-    const res = await apiFetch(`/api/timeout/slow?delay=${delay}`, { noJwt: true });
+    const url = `/api/timeout/slow?delay=${delay}`;
+    const res = await apiFetch(url, { noJwt: true });
     const elapsed = ((Date.now() - start) / 1000).toFixed(2);
     setLoading(btn, false);
     const isFallback = typeof res.body?.result === 'string' && res.body.result.includes('FALLBACK');
+    setHtml('timeout-request', requestViewer('GET', url, {}));
     setHtml('timeout-result', `
       <div class="alert ${isFallback ? 'alert-warning' : 'alert-success'}">
         ${isFallback ? '⚡ Timeout! Fallback returned after 3s' : `✅ Responded in ${elapsed}s`}
       </div>
-      ${responseViewer(res, `GET /api/timeout/slow?delay=${delay}s`)}
+      ${responseViewer(res, `GET ${url}`)}
     `);
   },
 
@@ -467,6 +522,7 @@ const handlers = {
     }
 
     const res = await apiFetch(url, { noJwt: true, headers });
+    setHtml(`version-v${version}-request`, requestViewer('GET', url, headers));
     setHtml(`version-v${version}-response`, responseViewer(res, `V${version} response`));
   },
 
@@ -476,13 +532,15 @@ const handlers = {
     const replay = btn.dataset.replay === 'true';
     const eventType = val('tp-event-type') || 'payment.completed';
     setLoading(btn, true);
+    const reqBody = { tamper, replay_attack: replay, type: eventType };
     const res = await apiFetch('/api/third-party/webhook/send-test', {
       noJwt: true,
       method: 'POST',
-      body: JSON.stringify({ tamper, replay_attack: replay, type: eventType }),
+      body: JSON.stringify(reqBody),
     });
     setLoading(btn, false);
-    setHtml('tp-webhook-result', responseViewer(res, `POST /api/third-party/webhook/send-test`));
+    setHtml('tp-webhook-request', requestViewer('POST', '/api/third-party/webhook/send-test', {'Content-Type':'application/json'}, reqBody));
+    setHtml('tp-webhook-result', responseViewer(res, 'POST /api/third-party/webhook/send-test'));
     // Refresh event log
     const log = await apiFetch('/api/third-party/events', { noJwt: true });
     if (log.ok) setHtml('tp-event-log', renderEventLog(log.body.events));
@@ -491,9 +549,11 @@ const handlers = {
   async tpOutbound(btn) {
     const scenario = btn.dataset.scenario;
     setLoading(btn, true);
-    const res = await apiFetch(`/api/third-party/outbound?scenario=${scenario}`, { noJwt: true });
+    const url = `/api/third-party/outbound?scenario=${scenario}`;
+    const res = await apiFetch(url, { noJwt: true });
     setLoading(btn, false);
-    setHtml('tp-outbound-result', responseViewer(res, `GET /api/third-party/outbound?scenario=${scenario}`));
+    setHtml('tp-outbound-request', requestViewer('GET', url, {}));
+    setHtml('tp-outbound-result', responseViewer(res, `GET ${url}`));
   },
 
   // ── PARTNER API ──────────────────────────────────────────────
@@ -522,7 +582,15 @@ const handlers = {
       '/api/partner/quota':     'partner-quota-result',
       '/api/partner/audit':     'partner-audit-result',
     };
+    const reqIdMap = {
+      '/api/partner/auth-info': 'partner-auth-request',
+      '/api/partner/catalog':   'partner-catalog-request',
+      '/api/partner/quota':     'partner-quota-request',
+      '/api/partner/audit':     'partner-audit-request',
+    };
     const targetId = idMap[endpoint] || 'partner-auth-result';
+    const reqTargetId = reqIdMap[endpoint] || 'partner-auth-request';
+    setHtml(reqTargetId, requestViewer('GET', endpoint, { 'X-Partner-Key': key }));
     setHtml(targetId, responseViewer(res, `GET ${endpoint}`));
   },
 
@@ -539,6 +607,7 @@ const handlers = {
 
     // Both v1 and v2 share the same result element so they appear side-by-side
     // conceptually (user clicks v1 then v2 to compare the schemas).
+    setHtml('partner-version-request', requestViewer('GET', `/api/partner/${version}/items`, { 'X-Partner-Key': key }));
     setHtml('partner-version-result', responseViewer(res, `GET /api/partner/${version}/items`));
   },
 
@@ -547,20 +616,18 @@ const handlers = {
     const eventType = val('partner-event-type'); // 'order.created' or 'inventory.low'
 
     setLoading(btn, true);
-    // POST because this triggers an action (dispatch a webhook), not a read.
-    // The server builds the event, signs it with HMAC-SHA256, and POSTs it
-    // to the partner's registered callback URL (/api/partner/callback-echo).
+    const reqBody = { event_type: eventType };
     const res = await apiFetch('/api/partner/webhook/dispatch', {
       noJwt: true,
       method: 'POST',
       headers: { 'X-Partner-Key': key },
-      body: JSON.stringify({ event_type: eventType }),
+      body: JSON.stringify(reqBody),
     });
     setLoading(btn, false);
 
-    // The response includes: the event payload, signature details, and delivery result.
-    // This lets the user see both the outbound signing (server side) and the
-    // callback-echo verification (partner side) in one response object.
+    setHtml('partner-webhook-request', requestViewer('POST', '/api/partner/webhook/dispatch', {
+      'X-Partner-Key': key, 'Content-Type': 'application/json'
+    }, reqBody));
     setHtml('partner-webhook-result', responseViewer(res, 'POST /api/partner/webhook/dispatch'));
   },
 
@@ -585,6 +652,7 @@ const handlers = {
     setLoading(btn, false);
     const isTimeout = res.status === 504 || res.body?.result?.includes?.('TIMEOUT') || res.body?.result?.includes?.('DEADLINE');
     setHtml('hanging-timer', `<span class="tag ${isTimeout ? 'tag-red' : 'tag-green'}">Responded in ${elapsed}s</span>`);
+    setHtml('hanging-request', requestViewer('GET', url, {}));
     setHtml('hanging-result', responseViewer(res, `GET ${url}`));
   },
 
@@ -601,6 +669,7 @@ const handlers = {
       body: body ? body : undefined,
       headers: extraHeaders,
     });
+    setHtml('error-request', requestViewer(method, endpoint, extraHeaders, body ? body : null));
     setHtml('error-response', responseViewer(res, `${method} ${endpoint}`));
   },
 };
@@ -679,7 +748,6 @@ function authJwt() {
           <button class="btn btn-primary" data-action="jwtLogin">Login →</button>
           ${State.jwt ? `<button class="btn btn-secondary btn-sm" data-action="jwtClear">Clear Token</button>` : ''}
         </div>
-        <div id="jwt-login-response" class="mt-12"></div>
       </div>
 
       <div class="card">
@@ -692,7 +760,14 @@ function authJwt() {
           <div id="jwt-decode-result" class="mt-12"></div>
         ` : ''}
       </div>
+    </div>
 
+    <div class="http-exchange">
+      <div id="jwt-login-request">${requestViewer(null)}</div>
+      <div id="jwt-login-response">${responseViewer(null)}</div>
+    </div>
+
+    <div class="demo-grid">
       <div class="card">
         <div class="card-title">Step 3 — Call Protected Endpoint</div>
         <div class="alert alert-info text-sm">
@@ -701,7 +776,6 @@ function authJwt() {
         <button class="btn btn-primary btn-block" data-action="jwtProtected" ${!State.jwt ? 'disabled' : ''}>
           GET /api/jwt/protected
         </button>
-        <div id="jwt-protected-response" class="mt-12">${responseViewer(null)}</div>
       </div>
 
       <div class="card">
@@ -715,6 +789,11 @@ function authJwt() {
           <tr><td>Payload private?</td><td><span class="con">✗ Base64 encoded, not encrypted</span></td></tr>
         </table>
       </div>
+    </div>
+
+    <div class="http-exchange">
+      <div id="jwt-protected-request">${requestViewer(null)}</div>
+      <div id="jwt-protected-response">${responseViewer(null)}</div>
     </div>`;
 }
 
@@ -756,8 +835,7 @@ function authBasic() {
       </div>
 
       <div class="card">
-        <div id="basic-response">${responseViewer(null)}</div>
-        <div class="divider"></div>
+        <div class="card-title">Basic Auth vs JWT</div>
         <table class="comparison-table">
           <thead><tr><th></th><th>Basic Auth</th><th>JWT</th></tr></thead>
           <tbody>
@@ -768,6 +846,11 @@ function authBasic() {
           </tbody>
         </table>
       </div>
+    </div>
+
+    <div class="http-exchange">
+      <div id="basic-request">${requestViewer(null)}</div>
+      <div id="basic-response">${responseViewer(null)}</div>
     </div>`;
 }
 
@@ -806,9 +889,7 @@ function authApiKey() {
       </div>
 
       <div class="card">
-        <div id="apikey-response">${responseViewer(null)}</div>
-        <div class="divider"></div>
-        <div class="card-title text-sm">Production Security Notes</div>
+        <div class="card-title">Production Security Notes</div>
         <ul class="text-sm text-muted" style="padding-left:18px;line-height:2">
           <li>Store only a <strong>SHA-256 hash</strong> of the key (like password hashing)</li>
           <li>Show the plain key <strong>once</strong> on creation — never again</li>
@@ -817,6 +898,11 @@ function authApiKey() {
           <li>Add <strong>caching</strong> (Redis) to avoid DB hit per request</li>
         </ul>
       </div>
+    </div>
+
+    <div class="http-exchange">
+      <div id="apikey-request">${requestViewer(null)}</div>
+      <div id="apikey-response">${responseViewer(null)}</div>
     </div>`;
 }
 
@@ -840,9 +926,17 @@ function oauthPage() {
         <button class="btn btn-primary btn-block" data-action="oauthClientCreds">
           Get Token + Call API →
         </button>
-        <div id="oauth-token-response" class="mt-12"></div>
-        <div id="oauth-api-response" class="mt-8"></div>
+        <div class="section-heading mt-12">Step 1 — Token Request</div>
+        <div class="http-exchange">
+          <div id="oauth-token-request">${requestViewer(null)}</div>
+          <div id="oauth-token-response">${responseViewer(null)}</div>
+        </div>
         <div id="oauth-token-visual" class="mt-8"></div>
+        <div class="section-heading">Step 2 — Resource Server Call</div>
+        <div class="http-exchange">
+          <div id="oauth-api-request">${requestViewer(null)}</div>
+          <div id="oauth-api-response">${responseViewer(null)}</div>
+        </div>
       </div>
 
       <div class="card">
@@ -928,9 +1022,7 @@ function rbacPage() {
       </div>
 
       <div class="card">
-        <div id="rbac-response">${responseViewer(null)}</div>
-        <div class="divider"></div>
-        <div class="card-title text-sm">Two Ways to Enforce Roles</div>
+        <div class="card-title">Two Ways to Enforce Roles</div>
         <div class="text-sm" style="line-height:1.8">
           <strong>1. URL rules in SecurityConfig</strong> — coarse-grained:<br>
           <code style="font-size:11px">.requestMatchers("/api/rbac/admin/**").hasRole("ADMIN")</code>
@@ -939,6 +1031,11 @@ function rbacPage() {
           <code style="font-size:11px">@PreAuthorize("hasRole('USER') and #userId == authentication.name")</code>
         </div>
       </div>
+    </div>
+
+    <div class="http-exchange">
+      <div id="rbac-request">${requestViewer(null)}</div>
+      <div id="rbac-response">${responseViewer(null)}</div>
     </div>`;
 }
 
@@ -971,6 +1068,7 @@ function rateLimitCard(key, label, endpoint, max, desc) {
         <button class="btn btn-primary btn-sm" data-action="rateSend" data-endpoint="${endpoint}" data-key="${key}">Send 1</button>
         <button class="btn btn-danger btn-sm" data-action="rateRapidFire" data-endpoint="${endpoint}" data-key="${key}">Rapid Fire ×10</button>
       </div>
+      <div id="rate-${key}-request" class="mt-8">${requestViewer(null)}</div>
       <div id="rate-${key}-response" class="mt-8">${responseViewer(null)}</div>
     </div>`;
 }
@@ -996,60 +1094,62 @@ function circuitBreakerPage() {
       Config: opens after <strong>50% failure rate</strong> over last 10 calls.
     </div>
 
-    <div class="card">
-      <div class="cb-diagram">
-        <div class="cb-state cb-state-closed ${state === 'CLOSED' ? 'active' : ''}">
-          <span class="cb-state-icon">✅</span>
-          <span class="cb-state-name">Closed</span>
-          <span class="cb-state-desc">Normal — requests flow through</span>
+    <div class="demo-grid">
+      <div class="card">
+        <div class="card-title">Circuit State (Live)</div>
+        <div class="cb-diagram">
+          <div class="cb-state cb-state-closed ${state === 'CLOSED' ? 'active' : ''}">
+            <span class="cb-state-icon">✅</span>
+            <span class="cb-state-name">Closed</span>
+            <span class="cb-state-desc">Normal — requests flow through</span>
+          </div>
+          <span class="cb-arrow">→</span>
+          <div class="cb-state cb-state-open ${state === 'OPEN' ? 'active' : ''}">
+            <span class="cb-state-icon">🚫</span>
+            <span class="cb-state-name">Open</span>
+            <span class="cb-state-desc">Failing — immediate fallback</span>
+          </div>
+          <span class="cb-arrow">→</span>
+          <div class="cb-state cb-state-half ${state === 'HALF_OPEN' ? 'active' : ''}">
+            <span class="cb-state-icon">🔶</span>
+            <span class="cb-state-name">Half-Open</span>
+            <span class="cb-state-desc">Testing recovery</span>
+          </div>
         </div>
-        <span class="cb-arrow">→</span>
-        <div class="cb-state cb-state-open ${state === 'OPEN' ? 'active' : ''}">
-          <span class="cb-state-icon">🚫</span>
-          <span class="cb-state-name">Open</span>
-          <span class="cb-state-desc">Failing — immediate fallback</span>
+        <div class="cb-stats">
+          <div class="cb-stat">
+            <div class="cb-stat-value" style="color:var(--success)">${State.cbSuccesses}</div>
+            <div class="cb-stat-label">Successes</div>
+          </div>
+          <div class="cb-stat">
+            <div class="cb-stat-value" style="color:var(--error)">${State.cbFailures}</div>
+            <div class="cb-stat-label">Failures</div>
+          </div>
+          <div class="cb-stat">
+            <div class="cb-stat-value" style="color:${state === 'CLOSED' ? 'var(--success)' : state === 'OPEN' ? 'var(--error)' : 'var(--warning)'}">${state}</div>
+            <div class="cb-stat-label">Circuit State</div>
+          </div>
         </div>
-        <span class="cb-arrow">→</span>
-        <div class="cb-state cb-state-half ${state === 'HALF_OPEN' ? 'active' : ''}">
-          <span class="cb-state-icon">🔶</span>
-          <span class="cb-state-name">Half-Open</span>
-          <span class="cb-state-desc">Testing recovery</span>
-        </div>
+        <div class="card-title text-sm mt-12">Event Log</div>
+        <div class="cb-log">${logHtml || '<span style="color:#475569">No events yet</span>'}</div>
       </div>
 
-      <div class="cb-stats">
-        <div class="cb-stat">
-          <div class="cb-stat-value" style="color:var(--success)">${State.cbSuccesses}</div>
-          <div class="cb-stat-label">Successes</div>
+      <div class="card">
+        <div class="card-title">Send Requests</div>
+        <div class="btn-group">
+          <button class="btn btn-success" data-action="cbSend" data-fail="false">✓ Success Request</button>
+          <button class="btn btn-danger" data-action="cbSend" data-fail="true">✗ Fail Request</button>
+          <button class="btn btn-secondary" data-action="cbReset">Reset</button>
         </div>
-        <div class="cb-stat">
-          <div class="cb-stat-value" style="color:var(--error)">${State.cbFailures}</div>
-          <div class="cb-stat-label">Failures</div>
+        <div class="text-xs text-muted mt-8">
+          Tip: send 6+ fail requests to open the circuit. Then send a success — notice the immediate fallback response.
         </div>
-        <div class="cb-stat">
-          <div class="cb-stat-value" style="color:${state === 'CLOSED' ? 'var(--success)' : state === 'OPEN' ? 'var(--error)' : 'var(--warning)'}">${state}</div>
-          <div class="cb-stat-label">Circuit State</div>
-        </div>
-      </div>
-
-      <div class="btn-group">
-        <button class="btn btn-success" data-action="cbSend" data-fail="false">✓ Success Request</button>
-        <button class="btn btn-danger" data-action="cbSend" data-fail="true">✗ Fail Request</button>
-        <button class="btn btn-secondary" data-action="cbReset">Reset</button>
-      </div>
-      <div class="text-xs text-muted mt-8">
-        Tip: send 6+ fail requests to open the circuit. Then send a success — notice the immediate fallback response.
       </div>
     </div>
 
-    <div class="demo-grid">
-      <div class="card">
-        <div class="card-title">Event Log</div>
-        <div class="cb-log">${logHtml || '<span style="color:#475569">No events yet</span>'}</div>
-      </div>
-      <div class="card">
-        <div id="cb-response">${responseViewer(null)}</div>
-      </div>
+    <div class="http-exchange">
+      <div id="cb-request">${requestViewer(null)}</div>
+      <div id="cb-response">${responseViewer(null)}</div>
     </div>
 
     <div class="card">
@@ -1062,7 +1162,8 @@ function circuitBreakerPage() {
         </div>
         <button class="btn btn-primary" data-action="timeoutSend" style="margin-top:18px">Send →</button>
       </div>
-      <div id="timeout-result" class="mt-12"></div>
+      <div id="timeout-request" class="mt-12">${requestViewer(null)}</div>
+      <div id="timeout-result" class="mt-8"></div>
     </div>`;
 }
 
@@ -1151,7 +1252,6 @@ function thirdPartyPage() {
             ✗ Replay attack — old timestamp (rejected)
           </button>
         </div>
-        <div id="tp-webhook-result" class="mt-12">${responseViewer(null)}</div>
       </div>
 
       <div class="card">
@@ -1175,31 +1275,40 @@ function thirdPartyPage() {
         </div>
       </div>
 
-      <div class="card full-width">
-        <div class="card-title">Pattern 2 — Outbound API Call Scenarios</div>
-        <div class="text-sm text-muted mb-12">
-          Click each scenario to see the correct handling pattern. Each maps to a real provider error you will encounter.
-        </div>
-        <div class="btn-group" style="flex-wrap:wrap;gap:8px">
-          <button class="btn btn-secondary" data-action="tpOutbound" data-scenario="success">
-            ✓ Success
-          </button>
-          <button class="btn btn-secondary" data-action="tpOutbound" data-scenario="rate-limited">
-            429 Rate Limited
-          </button>
-          <button class="btn btn-secondary" data-action="tpOutbound" data-scenario="auth-failed">
-            401 Auth Failed
-          </button>
-          <button class="btn btn-secondary" data-action="tpOutbound" data-scenario="server-error">
-            503 Server Error
-          </button>
-          <button class="btn btn-secondary" data-action="tpOutbound" data-scenario="schema-drift">
-            Schema Drift
-          </button>
-        </div>
-        <div id="tp-outbound-result" class="mt-12">${responseViewer(null)}</div>
-      </div>
+    </div>
 
+    <div class="http-exchange">
+      <div id="tp-webhook-request">${requestViewer(null)}</div>
+      <div id="tp-webhook-result">${responseViewer(null)}</div>
+    </div>
+
+    <div class="card full-width">
+      <div class="card-title">Pattern 2 — Outbound API Call Scenarios</div>
+      <div class="text-sm text-muted mb-12">
+        Click each scenario to see the correct handling pattern. Each maps to a real provider error you will encounter.
+      </div>
+      <div class="btn-group" style="flex-wrap:wrap;gap:8px">
+        <button class="btn btn-secondary" data-action="tpOutbound" data-scenario="success">
+          ✓ Success
+        </button>
+        <button class="btn btn-secondary" data-action="tpOutbound" data-scenario="rate-limited">
+          429 Rate Limited
+        </button>
+        <button class="btn btn-secondary" data-action="tpOutbound" data-scenario="auth-failed">
+          401 Auth Failed
+        </button>
+        <button class="btn btn-secondary" data-action="tpOutbound" data-scenario="server-error">
+          503 Server Error
+        </button>
+        <button class="btn btn-secondary" data-action="tpOutbound" data-scenario="schema-drift">
+          Schema Drift
+        </button>
+      </div>
+    </div>
+
+    <div class="http-exchange">
+      <div id="tp-outbound-request">${requestViewer(null)}</div>
+      <div id="tp-outbound-result">${responseViewer(null)}</div>
     </div>
 
     <div class="card">
@@ -1343,7 +1452,8 @@ function partnerApiPage() {
         <button class="btn btn-primary btn-block" data-action="partnerFetch" data-endpoint="/api/partner/auth-info">
           GET /api/partner/auth-info →
         </button>
-        <div id="partner-auth-result" class="mt-12">${responseViewer(null)}</div>
+        <div id="partner-auth-request" class="mt-12">${requestViewer(null)}</div>
+        <div id="partner-auth-result" class="mt-8">${responseViewer(null)}</div>
       </div>
 
       <div class="card">
@@ -1356,7 +1466,8 @@ function partnerApiPage() {
         <button class="btn btn-primary btn-block" data-action="partnerFetch" data-endpoint="/api/partner/catalog">
           GET /api/partner/catalog →
         </button>
-        <div id="partner-catalog-result" class="mt-12">${responseViewer(null)}</div>
+        <div id="partner-catalog-request" class="mt-12">${requestViewer(null)}</div>
+        <div id="partner-catalog-result" class="mt-8">${responseViewer(null)}</div>
       </div>
 
       <div class="card">
@@ -1369,7 +1480,8 @@ function partnerApiPage() {
         <button class="btn btn-primary btn-block" data-action="partnerFetch" data-endpoint="/api/partner/quota">
           GET /api/partner/quota →
         </button>
-        <div id="partner-quota-result" class="mt-12">${responseViewer(null)}</div>
+        <div id="partner-quota-request" class="mt-12">${requestViewer(null)}</div>
+        <div id="partner-quota-result" class="mt-8">${responseViewer(null)}</div>
       </div>
 
       <div class="card">
@@ -1382,7 +1494,8 @@ function partnerApiPage() {
         <button class="btn btn-primary btn-block" data-action="partnerFetch" data-endpoint="/api/partner/audit">
           GET /api/partner/audit →
         </button>
-        <div id="partner-audit-result" class="mt-12">${responseViewer(null)}</div>
+        <div id="partner-audit-request" class="mt-12">${requestViewer(null)}</div>
+        <div id="partner-audit-result" class="mt-8">${responseViewer(null)}</div>
       </div>
 
       <div class="card">
@@ -1401,7 +1514,8 @@ function partnerApiPage() {
             GET /v2/items (current)
           </button>
         </div>
-        <div id="partner-version-result" class="mt-12">${responseViewer(null)}</div>
+        <div id="partner-version-request" class="mt-12">${requestViewer(null)}</div>
+        <div id="partner-version-result" class="mt-8">${responseViewer(null)}</div>
       </div>
 
       <div class="card">
@@ -1422,7 +1536,8 @@ function partnerApiPage() {
         <button class="btn btn-primary btn-block mt-8" data-action="partnerDispatchWebhook">
           Dispatch webhook to partner callback →
         </button>
-        <div id="partner-webhook-result" class="mt-12">${responseViewer(null)}</div>
+        <div id="partner-webhook-request" class="mt-12">${requestViewer(null)}</div>
+        <div id="partner-webhook-result" class="mt-8">${responseViewer(null)}</div>
       </div>
 
     </div>
@@ -1553,7 +1668,10 @@ function hangingApisPage() {
 
     </div>
 
-    <div id="hanging-result" class="mt-8">${responseViewer(null)}</div>
+    <div class="http-exchange mt-8">
+      <div id="hanging-request">${requestViewer(null)}</div>
+      <div id="hanging-result">${responseViewer(null)}</div>
+    </div>
 
     <div class="card mt-16">
       <div class="card-title">Strategy Comparison</div>
@@ -1714,12 +1832,14 @@ function versioningPage() {
 
     <div class="version-compare">
       <div class="card">
-        <div class="card-title"><span class="version-badge version-v1">V1</span> Response</div>
-        <div id="version-v1-response">${responseViewer(null, 'V1 — click Fetch V1')}</div>
+        <div class="card-title"><span class="version-badge version-v1">V1</span></div>
+        <div id="version-v1-request">${requestViewer(null)}</div>
+        <div id="version-v1-response" class="mt-8">${responseViewer(null, 'V1 — click Fetch V1')}</div>
       </div>
       <div class="card">
-        <div class="card-title"><span class="version-badge version-v2">V2</span> Response</div>
-        <div id="version-v2-response">${responseViewer(null, 'V2 — click Fetch V2')}</div>
+        <div class="card-title"><span class="version-badge version-v2">V2</span></div>
+        <div id="version-v2-request">${requestViewer(null)}</div>
+        <div id="version-v2-response" class="mt-8">${responseViewer(null, 'V2 — click Fetch V2')}</div>
         <div class="alert alert-warning text-sm mt-8">
           Breaking change: <code>price</code> changed from a <code>number</code> to an <code>object</code>.
           V1 clients parsing <code>res.price * 1.1</code> would break on V2.
@@ -1807,9 +1927,7 @@ function errorsPage() {
       </div>
 
       <div class="card">
-        <div id="error-response">${responseViewer(null)}</div>
-        <div class="divider"></div>
-        <div class="card-title text-sm">Security: Never Leak Internals</div>
+        <div class="card-title">Security: Never Leak Internals</div>
         <div class="alert alert-error text-sm">
           <strong>BAD:</strong> <code>PSQLException: duplicate key violates constraint on table users at jdbc:mysql://prod-db:3306</code><br>
           Reveals DB type, hostname, schema details.
@@ -1819,6 +1937,11 @@ function errorsPage() {
           Client gets actionable info; internals stay server-side in logs.
         </div>
       </div>
+    </div>
+
+    <div class="http-exchange">
+      <div id="error-request">${requestViewer(null)}</div>
+      <div id="error-response">${responseViewer(null)}</div>
     </div>
 
     <div class="card">

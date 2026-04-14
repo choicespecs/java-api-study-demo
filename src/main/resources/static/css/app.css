@@ -626,6 +626,36 @@ code {
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
 
+/* ── HTTP METHOD COLORS (used in request viewer) ─────────── */
+.method-get    { color: #86efac; font-weight: 700; }
+.method-post   { color: #93c5fd; font-weight: 700; }
+.method-put    { color: #fbbf24; font-weight: 700; }
+.method-patch  { color: #fbbf24; font-weight: 700; }
+.method-delete { color: #fca5a5; font-weight: 700; }
+.method-badge  { font-family: monospace; font-size: 11px; font-weight: 700; background: rgba(255,255,255,.06); padding: 1px 7px; border-radius: 3px; }
+
+/* ── REQUEST VIEWER ──────────────────────────────────────── */
+.req-key { color: #93c5fd; }
+.req-val { color: #cbd5e1; }
+
+/* ── HTTP EXCHANGE (request | response side by side) ─────── */
+.http-exchange {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+/* ── FLOW LABEL (separates concept from exchange) ─────────── */
+.section-heading {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 20px 0 10px;
+}
+
 /* ── FADE IN ──────────────────────────────────────────────── */
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(6px); }
