@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>REST API Study Demo</title>
+  <link rel="stylesheet" href="/css/app.css" />
+</head>
+<body>
+  <div id="app">
+
+    <!-- ── SIDEBAR ─────────────────────────────────────────── -->
+    <aside id="sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-logo">
+          <span class="logo-icon">⚡</span>
+          <div>
+            <div class="logo-title">API Study</div>
+            <div class="logo-sub">Interactive Demo</div>
+          </div>
+        </div>
+      </div>
+
+      <nav class="sidebar-nav">
+        <a href="#home" class="nav-item" data-page="home">
+          <span class="nav-icon">🏠</span><span>Dashboard</span>
+        </a>
+
+        <div class="nav-section">Authentication</div>
+        <a href="#auth-jwt" class="nav-item" data-page="auth-jwt">
+          <span class="nav-icon">🎫</span><span>JWT Tokens</span>
+        </a>
+        <a href="#auth-basic" class="nav-item" data-page="auth-basic">
+          <span class="nav-icon">🔐</span><span>Basic Auth</span>
+        </a>
+        <a href="#auth-apikey" class="nav-item" data-page="auth-apikey">
+          <span class="nav-icon">🗝️</span><span>API Keys</span>
+        </a>
+        <a href="#oauth2" class="nav-item" data-page="oauth2">
+          <span class="nav-icon">🔑</span><span>OAuth2</span>
+        </a>
+
+        <div class="nav-section">Access Control</div>
+        <a href="#rbac" class="nav-item" data-page="rbac">
+          <span class="nav-icon">🛡️</span><span>RBAC</span>
+        </a>
+
+        <div class="nav-section">Reliability</div>
+        <a href="#rate-limit" class="nav-item" data-page="rate-limit">
+          <span class="nav-icon">⚡</span><span>Rate Limiting</span>
+        </a>
+        <a href="#circuit-breaker" class="nav-item" data-page="circuit-breaker">
+          <span class="nav-icon">🔄</span><span>Circuit Breaker</span>
+        </a>
+        <a href="#hanging-apis" class="nav-item" data-page="hanging-apis">
+          <span class="nav-icon">⏳</span><span>Hanging APIs</span>
+        </a>
+
+        <div class="nav-section">Integration</div>
+        <a href="#third-party" class="nav-item" data-page="third-party">
+          <span class="nav-icon">🔌</span><span>Consuming APIs</span>
+        </a>
+        <a href="#partner-api" class="nav-item" data-page="partner-api">
+          <span class="nav-icon">🤝</span><span>Partner Integration</span>
+        </a>
+
+        <div class="nav-section">API Design</div>
+        <a href="#pagination" class="nav-item" data-page="pagination">
+          <span class="nav-icon">📄</span><span>Pagination</span>
+        </a>
+        <a href="#versioning" class="nav-item" data-page="versioning">
+          <span class="nav-icon">📦</span><span>Versioning</span>
+        </a>
+        <a href="#errors" class="nav-item" data-page="errors">
+          <span class="nav-icon">⚠️</span><span>Error Handling</span>
+        </a>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="auth-status" id="auth-status">
+          <span class="status-dot status-dot--off"></span>
+          <span id="auth-status-text">Not logged in</span>
+        </div>
+        <div class="sidebar-links">
+          <a href="/swagger-ui.html" target="_blank">Swagger UI ↗</a>
+          <a href="/h2-console" target="_blank">H2 Console ↗</a>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ── MAIN CONTENT ───────────────────────────────────── -->
+    <main id="main">
+      <div id="content"><!-- rendered by JS --></div>
+    </main>
+
+  </div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>

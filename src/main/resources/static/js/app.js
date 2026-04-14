@@ -1,0 +1,1886 @@
+/* ═══════════════════════════════════════════════════════════
+   REST API Study Demo — Interactive Frontend
+   All pages, state, routing, and API calls in one file.
+   ═══════════════════════════════════════════════════════════ */
+
+// ── STATE ────────────────────────────────────────────────────
+const State = {
+  page: 'home',
+  jwt: null,
+  username: null,
+  apiKey: 'demo-api-key-user-12345',
+  paginationPage: 0,
+  paginationSize: 6,
+  paginationCategory: '',
+  paginationSearch: '',
+  cbFailures: 0,
+  cbSuccesses: 0,
+  cbState: 'CLOSED',
+  cbLog: [],
+  rateBuckets: { standard: 20, strict: 5, tiered: 10 },
+};
+
+// ── API HELPERS ───────────────────────────────────────────────
+async function apiFetch(url, options = {}) {
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+  if (State.jwt && !options.noJwt) headers['Authorization'] = `Bearer ${State.jwt}`;
+  try {
+    const res = await fetch(url, { ...options, headers });
+    let body;
+    try { body = await res.json(); } catch { body = await res.text(); }
+    return { status: res.status, ok: res.ok, body, headers: res.headers };
+  } catch (e) {
+    return { status: 0, ok: false, body: { error: 'Network error: ' + e.message }, headers: null };
+  }
+}
+
+// ── UTILITIES ─────────────────────────────────────────────────
+function syntaxHighlight(obj) {
+  const json = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+  return json
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/("(\\u[a-zA-Z0-9]{4}|\\[^u]|[^\\"])*"(\s*:)?|\b(true|false|null)\b|-?\d+(?:\.\d*)?(?:[eE][+\-]?\d+)?)/g,
+      m => {
+        let c = 'json-number';
+        if (/^"/.test(m)) c = /:$/.test(m) ? 'json-key' : 'json-string';
+        else if (/true|false/.test(m)) c = 'json-bool';
+        else if (/null/.test(m)) c = 'json-null';
+        return `<span class="${c}">${m}</span>`;
+      });
+}
+
+function statusBadge(status) {
+  if (!status) return '';
+  let cls = status >= 500 ? 'status-5xx' : status >= 400 ? (status === 429 ? 'status-429' : 'status-4xx') : 'status-2xx';
+  return `<span class="status-badge ${cls}">HTTP ${status}</span>`;
+}
+
+function responseViewer(res, label = 'Response') {
+  const body = res ? syntaxHighlight(res.body) : '<span class="response-placeholder">Hit a button to see the response here</span>';
+  return `
+    <div class="response-viewer">
+      <div class="response-header">
+        <span class="response-label">${label}</span>
+        ${res ? statusBadge(res.status) : ''}
+      </div>
+      <div class="response-body">${body}</div>
+    </div>`;
+}
+
+function b64decode(str) {
+  try { return JSON.parse(atob(str.replace(/-/g, '+').replace(/_/g, '/'))); } catch { return null; }
+}
+
+function parseJwt(token) {
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  return { header: b64decode(parts[0]), payload: b64decode(parts[1]), raw: parts };
+}
+
+function jwtVisualizer(token) {
+  if (!token) return `<div class="text-muted text-sm">Login to see your JWT here</div>`;
+  const parsed = parseJwt(token);
+  if (!parsed) return `<div class="text-muted text-sm">Invalid token</div>`;
+  const [h, p, s] = parsed.raw;
+  return `
+    <div class="jwt-parts">
+      <span class="jwt-part jwt-header" title="Header">${h.substring(0,20)}…</span>
+      <span class="jwt-dot">.</span>
+      <span class="jwt-part jwt-payload" title="Payload">${p.substring(0,20)}…</span>
+      <span class="jwt-dot">.</span>
+      <span class="jwt-part jwt-sig" title="Signature">${s.substring(0,14)}…</span>
+    </div>
+    <div class="jwt-decoded">
+      <div>
+        <div class="jwt-section-label jwt-header-label">🔴 Header</div>
+        <div class="response-viewer" style="font-size:11px">
+          <div class="response-body">${syntaxHighlight(parsed.header)}</div>
+        </div>
+      </div>
+      <div>
+        <div class="jwt-section-label jwt-payload-label">🟢 Payload (readable!)</div>
+        <div class="response-viewer" style="font-size:11px">
+          <div class="response-body">${syntaxHighlight(parsed.payload)}</div>
+        </div>
+      </div>
+      <div>
+        <div class="jwt-section-label jwt-sig-label">🔵 Signature</div>
+        <div class="response-viewer" style="font-size:11px">
+          <div class="response-body"><span class="json-string">"${s.substring(0,24)}…"</span>
+<span class="response-placeholder" style="display:block;margin-top:4px">HMAC-SHA256 of header+payload.
+Cannot be decoded — only verified.</span></div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function tokenMeter(current, max, label) {
+  const pct = max > 0 ? (current / max) * 100 : 0;
+  const cls = pct > 60 ? 'high' : pct > 20 ? 'medium' : 'low';
+  return `
+    <div class="token-meter">
+      <div class="token-count"><span>${label}</span><span>${current} / ${max} tokens</span></div>
+      <div class="token-track"><div class="token-fill token-fill--${cls}" style="width:${pct}%"></div></div>
+    </div>`;
+}
+
+// ── ROUTER ────────────────────────────────────────────────────
+function navigate(page) {
+  State.page = page;
+  document.querySelectorAll('.nav-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.page === page);
+  });
+  render();
+}
+
+window.addEventListener('hashchange', () => {
+  const page = location.hash.slice(1) || 'home';
+  navigate(page);
+});
+
+// ── RENDER ENGINE ─────────────────────────────────────────────
+const pages = {
+  home, 'auth-jwt': authJwt, 'auth-basic': authBasic, 'auth-apikey': authApiKey,
+  oauth2: oauthPage, rbac: rbacPage, 'rate-limit': rateLimitPage,
+  'circuit-breaker': circuitBreakerPage, 'hanging-apis': hangingApisPage,
+  'third-party': thirdPartyPage, 'partner-api': partnerApiPage,
+  pagination: paginationPage, versioning: versioningPage, errors: errorsPage,
+};
+
+function render() {
+  const fn = pages[State.page] || home;
+  document.getElementById('content').innerHTML = `<div>${fn()}</div>`;
+  updateAuthStatus();
+  // Auto-load data for pages that need an initial API call
+  if (State.page === 'pagination') handlers.paginationLoad();
+}
+
+function updateAuthStatus() {
+  const dot  = document.getElementById('auth-status').querySelector('.status-dot');
+  const text = document.getElementById('auth-status-text');
+  if (State.jwt) {
+    dot.className  = 'status-dot status-dot--on';
+    text.textContent = `Logged in as ${State.username || 'user'}`;
+  } else {
+    dot.className  = 'status-dot status-dot--off';
+    text.textContent = 'Not logged in';
+  }
+}
+
+// ── EVENT DELEGATION ─────────────────────────────────────────
+document.getElementById('main').addEventListener('click', async e => {
+  const btn = e.target.closest('[data-action]');
+  if (!btn || btn.disabled) return;
+  const action = btn.dataset.action;
+  if (handlers[action]) await handlers[action](btn);
+});
+
+document.getElementById('main').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && e.target.matches('[data-enter]')) {
+    const action = e.target.dataset.enter;
+    if (handlers[action]) handlers[action](e.target);
+  }
+});
+
+document.getElementById('sidebar').addEventListener('click', e => {
+  const item = e.target.closest('[data-page]');
+  if (item) {
+    e.preventDefault();
+    navigate(item.dataset.page);
+    location.hash = item.dataset.page;
+  }
+});
+
+// ── ACTION HANDLERS ───────────────────────────────────────────
+const handlers = {
+
+  // ── JWT LOGIN
+  async jwtLogin(btn) {
+    const user = val('jwt-username');
+    const pass = val('jwt-password');
+    if (!user || !pass) { flashError('Enter username and password'); return; }
+    setLoading(btn, true);
+    const res = await apiFetch('/api/auth/login', {
+      method: 'POST', noJwt: true,
+      body: JSON.stringify({ username: user, password: pass })
+    });
+    setLoading(btn, false);
+    if (res.ok) {
+      State.jwt = res.body.accessToken;
+      State.username = user;
+      // Re-render the whole page so conditional elements (Decode, Clear, Protected buttons)
+      // all appear correctly based on the updated State.jwt
+      render();
+      setHtml('jwt-login-response', responseViewer(res, 'POST /api/auth/login'));
+    } else {
+      setHtml('jwt-login-response', responseViewer(res, 'POST /api/auth/login'));
+    }
+  },
+
+  async jwtProtected() {
+    const res = await apiFetch('/api/jwt/protected');
+    setHtml('jwt-protected-response', responseViewer(res, 'GET /api/jwt/protected'));
+  },
+
+  async jwtDecode() {
+    if (!State.jwt) return;
+    const res = await apiFetch('/api/auth/decode', {
+      method: 'POST', noJwt: true,
+      body: JSON.stringify({ token: State.jwt })
+    });
+    setHtml('jwt-decode-result', responseViewer(res, 'Decoded Payload'));
+  },
+
+  jwtClear() {
+    State.jwt = null;
+    State.username = null;
+    render();
+  },
+
+  // ── BASIC AUTH
+  async basicTest(btn) {
+    const user = val('basic-user');
+    const pass = val('basic-pass');
+    const endpoint = val('basic-endpoint') || '/api/basic/protected';
+    setLoading(btn, true);
+    const creds = btoa(`${user}:${pass}`);
+    const res = await apiFetch(endpoint, {
+      noJwt: true,
+      headers: { Authorization: `Basic ${creds}` }
+    });
+    setLoading(btn, false);
+    setHtml('basic-response', responseViewer(res, `GET ${endpoint}`));
+  },
+
+  // ── API KEY
+  async apiKeyTest(btn) {
+    const key = val('apikey-input') || State.apiKey;
+    const endpoint = val('apikey-endpoint') || '/api/apikey/data';
+    setLoading(btn, true);
+    const res = await apiFetch(endpoint, {
+      noJwt: true,
+      headers: { 'X-API-Key': key }
+    });
+    setLoading(btn, false);
+    setHtml('apikey-response', responseViewer(res, `GET ${endpoint}`));
+  },
+
+  // ── OAUTH2
+  async oauthClientCreds(btn) {
+    setLoading(btn, true);
+    const creds = btoa('machine-client:machine-secret');
+    const res = await apiFetch('/oauth2/token', {
+      method: 'POST', noJwt: true,
+      headers: {
+        'Authorization': `Basic ${creds}`,
+        'Content-Type': 'application/x-www-form-urlencoded'
+      },
+      body: 'grant_type=client_credentials&scope=read'
+    });
+    setLoading(btn, false);
+    setHtml('oauth-token-response', responseViewer(res, 'POST /oauth2/token'));
+    if (res.ok && res.body.access_token) {
+      const token = res.body.access_token;
+      const parsed = parseJwt(token);
+      setHtml('oauth-token-visual', `
+        <div class="alert alert-success">OAuth2 token received! Using it to call the resource server...</div>
+        ${jwtVisualizer(token)}
+      `);
+      // Now call the resource server
+      const apiRes = await apiFetch('/api/oauth/data', {
+        noJwt: true,
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      setHtml('oauth-api-response', responseViewer(apiRes, 'GET /api/oauth/data (Resource Server)'));
+    }
+  },
+
+  oauthStartFlow() {
+    const url = '/oauth2/authorize?client_id=web-client&response_type=code' +
+      '&redirect_uri=http://localhost:8080/api/oauth/callback&scope=openid+read';
+    window.open(url, '_blank', 'width=600,height=700');
+  },
+
+  // ── RBAC
+  async rbacTest(btn) {
+    const role = val('rbac-role') || 'user';
+    const endpoint = val('rbac-endpoint') || '/api/rbac/viewer';
+    // Login as that role first
+    setLoading(btn, true);
+    const loginRes = await apiFetch('/api/auth/login', {
+      method: 'POST', noJwt: true,
+      body: JSON.stringify({ username: role, password: 'password' })
+    });
+    if (!loginRes.ok) {
+      setLoading(btn, false);
+      setHtml('rbac-response', responseViewer(loginRes, 'Login'));
+      return;
+    }
+    const token = loginRes.body.accessToken;
+    const res = await apiFetch(endpoint, {
+      noJwt: true,
+      headers: { Authorization: `Bearer ${token}` }
+    });
+    setLoading(btn, false);
+    setHtml('rbac-response', `
+      <div class="mb-8"><strong>Logged in as:</strong> <code>${role}</code>
+        <span class="tag tag-purple ml-8">${loginRes.body.roles?.join(', ')}</span>
+      </div>
+      ${responseViewer(res, `GET ${endpoint}`)}
+    `);
+  },
+
+  // ── RATE LIMIT
+  async rateSend(btn) {
+    const endpoint = btn.dataset.endpoint || '/api/rate/standard';
+    const key = btn.dataset.key || 'standard';
+    setLoading(btn, true);
+    const res = await apiFetch(endpoint, { noJwt: true });
+    setLoading(btn, false);
+    const remaining = res.headers?.get('X-Rate-Limit-Remaining');
+    const limit = res.headers?.get('X-Rate-Limit-Limit');
+    if (remaining !== null && limit !== null) {
+      State.rateBuckets[key] = parseInt(remaining);
+    }
+    if (!res.ok) State.rateBuckets[key] = 0;
+    setHtml(`rate-${key}-meter`, tokenMeter(State.rateBuckets[key], parseInt(limit || 20), 'Token bucket'));
+    setHtml(`rate-${key}-response`, responseViewer(res, `GET ${endpoint}`));
+  },
+
+  async rateRapidFire(btn) {
+    const endpoint = btn.dataset.endpoint || '/api/rate/standard';
+    const key = btn.dataset.key || 'standard';
+    btn.disabled = true;
+    for (let i = 0; i < 10; i++) {
+      const res = await apiFetch(endpoint, { noJwt: true });
+      const remaining = res.headers?.get('X-Rate-Limit-Remaining');
+      const limit = res.headers?.get('X-Rate-Limit-Limit');
+      if (remaining !== null && limit !== null) State.rateBuckets[key] = parseInt(remaining);
+      if (!res.ok) State.rateBuckets[key] = 0;
+      setHtml(`rate-${key}-meter`, tokenMeter(State.rateBuckets[key], parseInt(limit || 20), `Token bucket (request ${i+1}/10)`));
+      setHtml(`rate-${key}-response`, responseViewer(res, `Request ${i+1}/10 → GET ${endpoint}`));
+      await sleep(120);
+    }
+    btn.disabled = false;
+  },
+
+  // ── CIRCUIT BREAKER
+  async cbSend(btn) {
+    const fail = btn.dataset.fail === 'true';
+    setLoading(btn, true);
+    const res = await apiFetch(`/api/timeout/unreliable?fail=${fail}`, { noJwt: true });
+    setLoading(btn, false);
+
+    const isOpen = res.body?.result?.startsWith?.('FALLBACK');
+    const isFallback = typeof res.body?.result === 'string' && res.body.result.includes('FALLBACK');
+
+    if (fail || !res.ok) State.cbFailures++;
+    else if (!isFallback) State.cbSuccesses++;
+
+    const logEntry = { time: new Date().toLocaleTimeString(), fail, isFallback, status: res.status };
+    State.cbLog.unshift(logEntry);
+    if (State.cbLog.length > 8) State.cbLog.pop();
+
+    // Estimate CB state from failures
+    const total = State.cbFailures + State.cbSuccesses;
+    if (total >= 5 && State.cbFailures / total >= 0.5) State.cbState = 'OPEN';
+    else if (State.cbState === 'OPEN' && !fail) State.cbState = 'HALF_OPEN';
+    else if (State.cbState === 'HALF_OPEN' && !fail) State.cbState = 'CLOSED';
+
+    refreshCb(res);
+    setHtml('cb-response', responseViewer(res, `GET /api/timeout/unreliable?fail=${fail}`));
+  },
+
+  cbReset() {
+    State.cbFailures = 0;
+    State.cbSuccesses = 0;
+    State.cbState = 'CLOSED';
+    State.cbLog = [];
+    refreshCb(null);
+    setHtml('cb-response', responseViewer(null));
+  },
+
+  // ── TIMEOUT
+  async timeoutSend(btn) {
+    const delay = parseInt(val('timeout-delay') || '2');
+    setLoading(btn, true);
+    const start = Date.now();
+    const res = await apiFetch(`/api/timeout/slow?delay=${delay}`, { noJwt: true });
+    const elapsed = ((Date.now() - start) / 1000).toFixed(2);
+    setLoading(btn, false);
+    const isFallback = typeof res.body?.result === 'string' && res.body.result.includes('FALLBACK');
+    setHtml('timeout-result', `
+      <div class="alert ${isFallback ? 'alert-warning' : 'alert-success'}">
+        ${isFallback ? '⚡ Timeout! Fallback returned after 3s' : `✅ Responded in ${elapsed}s`}
+      </div>
+      ${responseViewer(res, `GET /api/timeout/slow?delay=${delay}s`)}
+    `);
+  },
+
+  // ── PAGINATION
+  async paginationLoad() {
+    const page = State.paginationPage;
+    const size = State.paginationSize;
+    const cat  = State.paginationCategory;
+    const search = State.paginationSearch;
+    let url = `/api/products?page=${page}&size=${size}&sort=name,asc`;
+    if (cat) url += `&category=${encodeURIComponent(cat)}`;
+    if (search) url += `&search=${encodeURIComponent(search)}`;
+    const res = await apiFetch(url, { noJwt: true });
+    if (res.ok) {
+      const d = res.body;
+      setHtml('product-grid', renderProductGrid(d));
+      setHtml('pagination-meta', `
+        <div class="pagination-info">Page ${d.currentPage + 1} of ${d.totalPages} (${d.totalElements} total products)</div>
+      `);
+      renderPaginationButtons(d);
+    }
+  },
+
+  paginationPrev() { if (State.paginationPage > 0) { State.paginationPage--; handlers.paginationLoad(); } },
+  paginationNext(btn) { State.paginationPage++; handlers.paginationLoad(); },
+
+  paginationFilter() {
+    State.paginationCategory = val('filter-category') || '';
+    State.paginationSearch   = val('filter-search') || '';
+    State.paginationPage = 0;
+    handlers.paginationLoad();
+  },
+
+  // ── VERSIONING
+  async versionFetch(btn) {
+    const strategy = val('version-strategy') || 'uri';
+    const version  = btn.dataset.version;
+    let url = '/api/v1/items'; // default
+    const headers = {};
+
+    if (strategy === 'uri') {
+      url = `/api/v${version}/items`;
+    } else if (strategy === 'header') {
+      url = '/api/items/by-header';
+      headers['X-API-Version'] = version;
+    } else if (strategy === 'query') {
+      url = `/api/items/by-param?version=${version}`;
+    } else if (strategy === 'accept') {
+      url = '/api/items/by-accept';
+      headers['Accept'] = `application/vnd.demo.v${version}+json`;
+    }
+
+    const res = await apiFetch(url, { noJwt: true, headers });
+    setHtml(`version-v${version}-response`, responseViewer(res, `V${version} response`));
+  },
+
+  // ── THIRD-PARTY APIs
+  async tpSendWebhook(btn) {
+    const tamper = btn.dataset.tamper === 'true';
+    const replay = btn.dataset.replay === 'true';
+    const eventType = val('tp-event-type') || 'payment.completed';
+    setLoading(btn, true);
+    const res = await apiFetch('/api/third-party/webhook/send-test', {
+      noJwt: true,
+      method: 'POST',
+      body: JSON.stringify({ tamper, replay_attack: replay, type: eventType }),
+    });
+    setLoading(btn, false);
+    setHtml('tp-webhook-result', responseViewer(res, `POST /api/third-party/webhook/send-test`));
+    // Refresh event log
+    const log = await apiFetch('/api/third-party/events', { noJwt: true });
+    if (log.ok) setHtml('tp-event-log', renderEventLog(log.body.events));
+  },
+
+  async tpOutbound(btn) {
+    const scenario = btn.dataset.scenario;
+    setLoading(btn, true);
+    const res = await apiFetch(`/api/third-party/outbound?scenario=${scenario}`, { noJwt: true });
+    setLoading(btn, false);
+    setHtml('tp-outbound-result', responseViewer(res, `GET /api/third-party/outbound?scenario=${scenario}`));
+  },
+
+  // ── PARTNER API ──────────────────────────────────────────────
+  //
+  // All partner requests send noJwt:true because the partner API uses
+  // X-Partner-Key header auth, not the JWT stored in State.jwt.
+  // apiFetch's default behaviour would inject the JWT if one exists,
+  // which would be wrong here — partner endpoints don't accept JWTs.
+  //
+  async partnerFetch(btn) {
+    const endpoint = btn.dataset.endpoint;
+    const key = val('partner-key'); // reads the <select> for the active partner key
+
+    setLoading(btn, true);
+    const res = await apiFetch(endpoint, {
+      noJwt: true,                         // do NOT inject JWT — not applicable here
+      headers: { 'X-Partner-Key': key },   // partner identity is in this header
+    });
+    setLoading(btn, false);
+
+    // Multiple buttons share this handler; route the response to the correct
+    // result element based on which endpoint was called.
+    const idMap = {
+      '/api/partner/auth-info': 'partner-auth-result',
+      '/api/partner/catalog':   'partner-catalog-result',
+      '/api/partner/quota':     'partner-quota-result',
+      '/api/partner/audit':     'partner-audit-result',
+    };
+    const targetId = idMap[endpoint] || 'partner-auth-result';
+    setHtml(targetId, responseViewer(res, `GET ${endpoint}`));
+  },
+
+  async partnerVersionFetch(btn) {
+    const version = btn.dataset.version; // 'v1' or 'v2' from data-version attribute
+    const key = val('partner-key');
+
+    setLoading(btn, true);
+    const res = await apiFetch(`/api/partner/${version}/items`, {
+      noJwt: true,
+      headers: { 'X-Partner-Key': key },
+    });
+    setLoading(btn, false);
+
+    // Both v1 and v2 share the same result element so they appear side-by-side
+    // conceptually (user clicks v1 then v2 to compare the schemas).
+    setHtml('partner-version-result', responseViewer(res, `GET /api/partner/${version}/items`));
+  },
+
+  async partnerDispatchWebhook(btn) {
+    const key       = val('partner-key');
+    const eventType = val('partner-event-type'); // 'order.created' or 'inventory.low'
+
+    setLoading(btn, true);
+    // POST because this triggers an action (dispatch a webhook), not a read.
+    // The server builds the event, signs it with HMAC-SHA256, and POSTs it
+    // to the partner's registered callback URL (/api/partner/callback-echo).
+    const res = await apiFetch('/api/partner/webhook/dispatch', {
+      noJwt: true,
+      method: 'POST',
+      headers: { 'X-Partner-Key': key },
+      body: JSON.stringify({ event_type: eventType }),
+    });
+    setLoading(btn, false);
+
+    // The response includes: the event payload, signature details, and delivery result.
+    // This lets the user see both the outbound signing (server side) and the
+    // callback-echo verification (partner side) in one response object.
+    setHtml('partner-webhook-result', responseViewer(res, 'POST /api/partner/webhook/dispatch'));
+  },
+
+  // ── HANGING APIS
+  async hangingSend(btn) {
+    const approach = btn.dataset.approach;
+    const delay    = parseInt(val('hanging-delay') || '5');
+    const deadline = parseInt(val('hanging-deadline') || '3');
+    let url;
+    if (approach === 'no-timeout') {
+      url = `/api/hanging/no-timeout?delay=${delay}`;
+    } else if (approach === 'deadline') {
+      url = `/api/hanging/with-deadline?delay=${delay}&deadline=${deadline}`;
+    } else {
+      url = `/api/hanging/http-client?delay=${delay}&timeout=${deadline}`;
+    }
+    setHtml('hanging-result', `<div class="alert alert-info text-sm">⏳ Request in flight… (watching for ${deadline}s deadline)</div>`);
+    setLoading(btn, true);
+    const start = Date.now();
+    const res = await apiFetch(url, { noJwt: true });
+    const elapsed = ((Date.now() - start) / 1000).toFixed(2);
+    setLoading(btn, false);
+    const isTimeout = res.status === 504 || res.body?.result?.includes?.('TIMEOUT') || res.body?.result?.includes?.('DEADLINE');
+    setHtml('hanging-timer', `<span class="tag ${isTimeout ? 'tag-red' : 'tag-green'}">Responded in ${elapsed}s</span>`);
+    setHtml('hanging-result', responseViewer(res, `GET ${url}`));
+  },
+
+  // ── ERRORS
+  async errorTrigger(btn) {
+    const endpoint = btn.dataset.endpoint;
+    const method = btn.dataset.method || 'GET';
+    const body = btn.dataset.body;
+    const basicAuth = btn.dataset.basicAuth;
+    const extraHeaders = basicAuth ? { Authorization: `Basic ${btoa(basicAuth)}` } : {};
+    const res = await apiFetch(endpoint, {
+      noJwt: true,
+      method,
+      body: body ? body : undefined,
+      headers: extraHeaders,
+    });
+    setHtml('error-response', responseViewer(res, `${method} ${endpoint}`));
+  },
+};
+
+// ── PAGE: HOME ────────────────────────────────────────────────
+function home() {
+  return `
+    <div class="page-title">REST API Study Demo</div>
+    <div class="page-sub">An interactive playground for learning REST API concepts hands-on.</div>
+
+    <div class="concept-grid">
+      ${card('🎫', 'JWT Authentication', 'Login, receive tokens, decode the payload, use Bearer auth.', 'auth-jwt')}
+      ${card('🔐', 'Basic Auth', 'HTTP Basic — credentials on every request.', 'auth-basic')}
+      ${card('🗝️', 'API Keys', 'Opaque keys — instantly revocable, DB-backed.', 'auth-apikey')}
+      ${card('🔑', 'OAuth2', 'Authorization Code & Client Credentials flows.', 'oauth2')}
+      ${card('🛡️', 'RBAC', 'Role-based access: ADMIN, USER, VIEWER.', 'rbac')}
+      ${card('⚡', 'Rate Limiting', 'Token bucket — send rapid requests and see 429.', 'rate-limit')}
+      ${card('🔄', 'Circuit Breaker', 'Simulate failures, watch the circuit open and recover.', 'circuit-breaker')}
+      ${card('⏳', 'Hanging APIs', 'Thread exhaustion, deadlines, and HTTP client timeouts.', 'hanging-apis')}
+      ${card('🔌', 'Third-Party APIs', 'Webhook verification, outbound error handling, credential management.', 'third-party')}
+      ${card('🤝', 'Partner Integration', 'B2B API design: partner keys, tenant isolation, tiered limits, versioning contracts.', 'partner-api')}
+      ${card('📄', 'Pagination', 'Browse products with filtering, sorting, and pages.', 'pagination')}
+      ${card('📦', 'API Versioning', 'URI, header, query param, and Accept header strategies.', 'versioning')}
+      ${card('⚠️', 'Error Handling', 'RFC 7807 Problem Details — consistent, safe errors.', 'errors')}
+    </div>
+
+    <div class="card">
+      <div class="card-title">🔑 Demo Credentials</div>
+      <table class="cred-table">
+        <thead><tr><th>Type</th><th>Identifier</th><th>Secret</th><th>Roles / Scopes</th></tr></thead>
+        <tbody>
+          <tr><td>User</td><td><code>admin</code></td><td><code>password</code></td><td><span class="tag tag-red">ADMIN</span> <span class="tag tag-blue">USER</span></td></tr>
+          <tr><td>User</td><td><code>user</code></td><td><code>password</code></td><td><span class="tag tag-blue">USER</span></td></tr>
+          <tr><td>User</td><td><code>viewer</code></td><td><code>password</code></td><td><span class="tag tag-green">VIEWER</span></td></tr>
+          <tr><td>API Key (Admin)</td><td colspan="2"><code>demo-api-key-admin-12345</code></td><td><span class="tag tag-red">ADMIN</span></td></tr>
+          <tr><td>API Key (User)</td><td colspan="2"><code>demo-api-key-user-12345</code></td><td><span class="tag tag-blue">USER</span></td></tr>
+          <tr><td>OAuth2 Client</td><td><code>machine-client</code></td><td><code>machine-secret</code></td><td><span class="tag tag-purple">client_credentials</span></td></tr>
+          <tr><td>OAuth2 Client</td><td><code>web-client</code></td><td><code>web-secret</code></td><td><span class="tag tag-purple">authorization_code</span></td></tr>
+        </tbody>
+      </table>
+    </div>`;
+}
+
+function card(icon, title, desc, page) {
+  return `<div class="concept-card" onclick="navigate('${page}'); location.hash='${page}'">
+    <span class="concept-card-icon">${icon}</span>
+    <div class="concept-card-title">${title}</div>
+    <div class="concept-card-desc">${desc}</div>
+  </div>`;
+}
+
+// ── PAGE: JWT AUTH ────────────────────────────────────────────
+function authJwt() {
+  return `
+    <div class="page-title">🎫 JWT Authentication</div>
+    <div class="page-sub">JSON Web Tokens — stateless, self-contained, signed credentials.</div>
+
+    <div class="concept-box">
+      A JWT has 3 Base64URL-encoded parts: <strong>HEADER</strong> <code>.</code> <strong>PAYLOAD</strong> <code>.</code> <strong>SIGNATURE</strong><br>
+      The payload is readable by anyone — it is <strong>signed, not encrypted</strong>. Never put secrets in a JWT.<br>
+      Access tokens are short-lived (15 min). Refresh tokens are long-lived (24 hr) and stored securely.
+    </div>
+
+    <div class="demo-grid">
+      <div class="card">
+        <div class="card-title">Step 1 — Login</div>
+        <div class="form-row">
+          <label class="form-label">Username</label>
+          <input class="form-input" id="jwt-username" value="user" data-enter="jwtLogin" placeholder="admin, user, or viewer">
+        </div>
+        <div class="form-row">
+          <label class="form-label">Password</label>
+          <input class="form-input" id="jwt-password" type="password" value="password" data-enter="jwtLogin">
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-primary" data-action="jwtLogin">Login →</button>
+          ${State.jwt ? `<button class="btn btn-secondary btn-sm" data-action="jwtClear">Clear Token</button>` : ''}
+        </div>
+        <div id="jwt-login-response" class="mt-12"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Step 2 — Your Token</div>
+        <div id="jwt-visualizer">${jwtVisualizer(State.jwt)}</div>
+        ${State.jwt ? `
+          <div class="btn-group mt-12">
+            <button class="btn btn-secondary btn-sm" data-action="jwtDecode">Decode Payload</button>
+          </div>
+          <div id="jwt-decode-result" class="mt-12"></div>
+        ` : ''}
+      </div>
+
+      <div class="card">
+        <div class="card-title">Step 3 — Call Protected Endpoint</div>
+        <div class="alert alert-info text-sm">
+          <code>Authorization: Bearer &lt;accessToken&gt;</code> is sent automatically.
+        </div>
+        <button class="btn btn-primary btn-block" data-action="jwtProtected" ${!State.jwt ? 'disabled' : ''}>
+          GET /api/jwt/protected
+        </button>
+        <div id="jwt-protected-response" class="mt-12">${responseViewer(null)}</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">How JWT Works</div>
+        <table class="comparison-table">
+          <tr><td>Sign with</td><td>HMAC-SHA256 (symmetric secret)</td></tr>
+          <tr><td>Access token TTL</td><td>15 minutes</td></tr>
+          <tr><td>Refresh token TTL</td><td>24 hours</td></tr>
+          <tr><td>Revocable?</td><td><span class="con">✗ Not without a token blocklist</span></td></tr>
+          <tr><td>DB lookup needed?</td><td><span class="pro">✓ No — signature check only</span></td></tr>
+          <tr><td>Payload private?</td><td><span class="con">✗ Base64 encoded, not encrypted</span></td></tr>
+        </table>
+      </div>
+    </div>`;
+}
+
+// ── PAGE: BASIC AUTH ──────────────────────────────────────────
+function authBasic() {
+  return `
+    <div class="page-title">🔐 HTTP Basic Authentication</div>
+    <div class="page-sub">Credentials sent as Base64(username:password) on every request.</div>
+
+    <div class="concept-box">
+      Header sent: <code>Authorization: Basic base64("username:password")</code><br>
+      Simple, but credentials travel on every request — always use HTTPS.<br>
+      No expiry — "logout" only works by changing the password.
+    </div>
+
+    <div class="demo-grid">
+      <div class="card">
+        <div class="card-title">Test Basic Auth</div>
+        <div class="form-row">
+          <label class="form-label">Username</label>
+          <input class="form-input" id="basic-user" value="user" placeholder="admin, user, or viewer">
+        </div>
+        <div class="form-row">
+          <label class="form-label">Password</label>
+          <input class="form-input" id="basic-pass" value="password" type="password">
+        </div>
+        <div class="form-row">
+          <label class="form-label">Endpoint</label>
+          <select class="form-select" id="basic-endpoint">
+            <option value="/api/basic/protected">GET /api/basic/protected (any role)</option>
+            <option value="/api/basic/admin">GET /api/basic/admin (ADMIN only)</option>
+            <option value="/api/basic/public">GET /api/basic/public (no auth)</option>
+          </select>
+        </div>
+        <button class="btn btn-primary btn-block" data-action="basicTest">Send Request</button>
+        <div class="mt-12 text-sm text-muted">
+          Try <code>user</code> on <code>/api/basic/admin</code> → you'll get <strong>403 Forbidden</strong>
+        </div>
+      </div>
+
+      <div class="card">
+        <div id="basic-response">${responseViewer(null)}</div>
+        <div class="divider"></div>
+        <table class="comparison-table">
+          <thead><tr><th></th><th>Basic Auth</th><th>JWT</th></tr></thead>
+          <tbody>
+            <tr><td>Credentials sent</td><td>Every request</td><td>Only on login</td></tr>
+            <tr><td>Expiry</td><td class="con">None</td><td class="pro">15 min access token</td></tr>
+            <tr><td>Revoke?</td><td>Change password</td><td>Blocklist or wait</td></tr>
+            <tr><td>DB lookup</td><td>Every request</td><td>Signature only</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+// ── PAGE: API KEY ─────────────────────────────────────────────
+function authApiKey() {
+  return `
+    <div class="page-title">🗝️ API Key Authentication</div>
+    <div class="page-sub">Opaque tokens sent in a header — validated via database lookup.</div>
+
+    <div class="concept-box">
+      Header sent: <code>X-API-Key: &lt;key&gt;</code><br>
+      Unlike JWT, the server looks up the key in the database on <strong>every request</strong>.<br>
+      Key advantage: <strong>instantly revocable</strong> — flip <code>active=false</code> in the DB.
+    </div>
+
+    <div class="demo-grid">
+      <div class="card">
+        <div class="card-title">Test API Key</div>
+        <div class="form-row">
+          <label class="form-label">API Key</label>
+          <select class="form-select" id="apikey-input">
+            <option value="demo-api-key-user-12345">demo-api-key-user-12345 (USER role)</option>
+            <option value="demo-api-key-admin-12345">demo-api-key-admin-12345 (ADMIN role)</option>
+            <option value="demo-api-key-expired-12345">demo-api-key-expired-12345 (EXPIRED)</option>
+            <option value="invalid-key">invalid-key (should fail)</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label class="form-label">Endpoint</label>
+          <select class="form-select" id="apikey-endpoint">
+            <option value="/api/apikey/data">GET /api/apikey/data</option>
+            <option value="/api/apikey/admin">GET /api/apikey/admin (ADMIN only)</option>
+          </select>
+        </div>
+        <button class="btn btn-primary btn-block" data-action="apiKeyTest">Send Request</button>
+      </div>
+
+      <div class="card">
+        <div id="apikey-response">${responseViewer(null)}</div>
+        <div class="divider"></div>
+        <div class="card-title text-sm">Production Security Notes</div>
+        <ul class="text-sm text-muted" style="padding-left:18px;line-height:2">
+          <li>Store only a <strong>SHA-256 hash</strong> of the key (like password hashing)</li>
+          <li>Show the plain key <strong>once</strong> on creation — never again</li>
+          <li>Add <strong>per-key rate limiting</strong> independently</li>
+          <li>Support key <strong>rotation</strong> with overlap period</li>
+          <li>Add <strong>caching</strong> (Redis) to avoid DB hit per request</li>
+        </ul>
+      </div>
+    </div>`;
+}
+
+// ── PAGE: OAUTH2 ──────────────────────────────────────────────
+function oauthPage() {
+  return `
+    <div class="page-title">🔑 OAuth2 & OpenID Connect</div>
+    <div class="page-sub">Delegated authorization — clients access resources on behalf of users.</div>
+
+    <div class="concept-box">
+      <strong>Problem OAuth2 solves:</strong> How does App B access your data on App A <em>without your password?</em><br>
+      The user grants permission → the Authorization Server issues a token → App B uses the token.<br>
+      This app is both the <strong>Authorization Server</strong> (issues tokens) and the <strong>Resource Server</strong> (validates them).
+    </div>
+
+    <div class="demo-grid">
+      <div class="card">
+        <div class="card-title">Flow 1 — Client Credentials (M2M)</div>
+        <div class="alert alert-info text-sm">Machine-to-machine: no user involved. Server authenticates directly.</div>
+        <div class="text-sm text-muted mb-8">Client: <code>machine-client</code> / <code>machine-secret</code></div>
+        <button class="btn btn-primary btn-block" data-action="oauthClientCreds">
+          Get Token + Call API →
+        </button>
+        <div id="oauth-token-response" class="mt-12"></div>
+        <div id="oauth-api-response" class="mt-8"></div>
+        <div id="oauth-token-visual" class="mt-8"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Flow 2 — Authorization Code (User Login)</div>
+        <div class="alert alert-warning text-sm">Opens a browser window — login with <code>admin/password</code>.</div>
+        <ol class="text-sm" style="padding-left:18px;line-height:2.2">
+          <li>Click the button → browser opens the authorization endpoint</li>
+          <li>Login with <code>admin / password</code></li>
+          <li>Click "Approve" on the consent screen</li>
+          <li>Browser redirects to <code>/api/oauth/callback?code=...</code></li>
+          <li>Copy the <code>code</code> value to exchange for a token</li>
+        </ol>
+        <button class="btn btn-secondary btn-block mt-12" data-action="oauthStartFlow">
+          🔗 Open Authorization Flow ↗
+        </button>
+      </div>
+
+      <div class="card full-width">
+        <div class="card-title">OAuth2 Roles in this Demo</div>
+        <table class="comparison-table">
+          <thead><tr><th>Role</th><th>What it does</th><th>In this demo</th></tr></thead>
+          <tbody>
+            <tr><td>Authorization Server</td><td>Issues tokens after user consent</td><td>This app at <code>/oauth2/**</code></td></tr>
+            <tr><td>Resource Server</td><td>Validates tokens, serves protected data</td><td>This app at <code>/api/oauth/**</code></td></tr>
+            <tr><td>Client</td><td>The app requesting access</td><td><code>machine-client</code> or <code>web-client</code></td></tr>
+            <tr><td>Resource Owner</td><td>The user who owns the data</td><td>admin/user/viewer</td></tr>
+          </tbody>
+        </table>
+        <div class="divider"></div>
+        <div class="card-title text-sm">Key Endpoints</div>
+        <table class="cred-table">
+          <tr><td><code>GET /.well-known/openid-configuration</code></td><td>OIDC discovery document</td></tr>
+          <tr><td><code>GET /oauth2/jwks</code></td><td>Public keys for token verification</td></tr>
+          <tr><td><code>POST /oauth2/token</code></td><td>Exchange credentials/code for tokens</td></tr>
+          <tr><td><code>GET /oauth2/authorize</code></td><td>Start authorization code flow</td></tr>
+          <tr><td><code>POST /oauth2/revoke</code></td><td>Revoke a token</td></tr>
+        </table>
+      </div>
+    </div>`;
+}
+
+// ── PAGE: RBAC ────────────────────────────────────────────────
+function rbacPage() {
+  return `
+    <div class="page-title">🛡️ Role-Based Access Control</div>
+    <div class="page-sub">Permissions assigned to roles, roles assigned to users.</div>
+
+    <div class="concept-box">
+      RBAC asks: <strong>"What role does this user have?"</strong> then grants access accordingly.<br>
+      Spring Security supports URL-level rules in <code>SecurityConfig</code> and method-level rules with <code>@PreAuthorize</code>.<br>
+      Role hierarchy: <strong>ADMIN &gt; USER &gt; VIEWER</strong>
+    </div>
+
+    <div class="demo-grid">
+      <div class="card">
+        <div class="card-title">Try Different Roles</div>
+        <div class="form-row">
+          <label class="form-label">Login as</label>
+          <select class="form-select" id="rbac-role">
+            <option value="admin">admin (ROLE_ADMIN + ROLE_USER)</option>
+            <option value="user" selected>user (ROLE_USER)</option>
+            <option value="viewer">viewer (ROLE_VIEWER)</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label class="form-label">Endpoint to call</label>
+          <select class="form-select" id="rbac-endpoint">
+            <option value="/api/rbac/viewer">GET /api/rbac/viewer (VIEWER+)</option>
+            <option value="/api/rbac/user">GET /api/rbac/user (USER+)</option>
+            <option value="/api/rbac/admin">GET /api/rbac/admin (ADMIN only)</option>
+            <option value="/api/rbac/method-security/admin-only">GET /api/rbac/method-security/admin-only (@PreAuthorize)</option>
+          </select>
+        </div>
+        <button class="btn btn-primary btn-block" data-action="rbacTest">Test Access →</button>
+
+        <div class="divider"></div>
+        <div class="text-sm text-muted">
+          Interesting combinations to try:<br>
+          <code>viewer</code> → <code>/api/rbac/user</code> → <span class="tag tag-red">403</span><br>
+          <code>user</code> → <code>/api/rbac/admin</code> → <span class="tag tag-red">403</span><br>
+          <code>admin</code> → any → <span class="tag tag-green">200</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div id="rbac-response">${responseViewer(null)}</div>
+        <div class="divider"></div>
+        <div class="card-title text-sm">Two Ways to Enforce Roles</div>
+        <div class="text-sm" style="line-height:1.8">
+          <strong>1. URL rules in SecurityConfig</strong> — coarse-grained:<br>
+          <code style="font-size:11px">.requestMatchers("/api/rbac/admin/**").hasRole("ADMIN")</code>
+          <br><br>
+          <strong>2. @PreAuthorize on methods</strong> — fine-grained + ownership:<br>
+          <code style="font-size:11px">@PreAuthorize("hasRole('USER') and #userId == authentication.name")</code>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ── PAGE: RATE LIMITING ───────────────────────────────────────
+function rateLimitPage() {
+  return `
+    <div class="page-title">⚡ Rate Limiting</div>
+    <div class="page-sub">Token bucket algorithm — exhaust tokens to trigger 429 Too Many Requests.</div>
+
+    <div class="concept-box">
+      Each client gets a <strong>bucket of tokens</strong>. Each request consumes 1 token. Tokens refill at a fixed rate.<br>
+      If the bucket is empty → <code>429 Too Many Requests</code>.<br>
+      Response headers tell clients how many tokens remain and how long to wait: <code>X-Rate-Limit-Remaining</code>, <code>Retry-After</code>
+    </div>
+
+    <div class="triple-grid">
+      ${rateLimitCard('standard', 'Standard', '/api/rate/standard', 20, 'Per-IP: 20 requests per minute')}
+      ${rateLimitCard('strict', 'Strict', '/api/rate/strict', 5, 'Shared: 5 requests per minute — models login endpoints')}
+      ${rateLimitCard('tiered', 'Tiered', '/api/rate/tiered', 10, 'Burst: 10/10s AND Sustained: 100/hr — both must pass')}
+    </div>`;
+}
+
+function rateLimitCard(key, label, endpoint, max, desc) {
+  return `
+    <div class="card">
+      <div class="card-title">${label} Limit</div>
+      <div class="text-sm text-muted mb-8">${desc}</div>
+      <div id="rate-${key}-meter">${tokenMeter(State.rateBuckets[key] ?? max, max, 'Token bucket')}</div>
+      <div class="btn-group mt-8">
+        <button class="btn btn-primary btn-sm" data-action="rateSend" data-endpoint="${endpoint}" data-key="${key}">Send 1</button>
+        <button class="btn btn-danger btn-sm" data-action="rateRapidFire" data-endpoint="${endpoint}" data-key="${key}">Rapid Fire ×10</button>
+      </div>
+      <div id="rate-${key}-response" class="mt-8">${responseViewer(null)}</div>
+    </div>`;
+}
+
+// ── PAGE: CIRCUIT BREAKER ─────────────────────────────────────
+function circuitBreakerPage() {
+  const state = State.cbState;
+  const logHtml = State.cbLog.map(e => `
+    <div class="cb-log-entry">
+      <span class="cb-log-time">${e.time}</span>
+      <span class="${e.isFallback ? 'cb-log-fallback' : e.fail ? 'cb-log-failure' : 'cb-log-success'}">
+        ${e.isFallback ? '⚡ FALLBACK' : e.fail ? '✗ FAILURE' : '✓ SUCCESS'}
+      </span>
+    </div>`).join('');
+
+  return `
+    <div class="page-title">🔄 Circuit Breaker</div>
+    <div class="page-sub">Fail fast to prevent cascading failures when a downstream service is broken.</div>
+
+    <div class="concept-box">
+      Like an electrical circuit breaker: too many failures → circuit <strong>OPENS</strong> → requests fail immediately without trying the service.<br>
+      After a cooldown (10s), the circuit goes <strong>HALF-OPEN</strong> to test recovery.<br>
+      Config: opens after <strong>50% failure rate</strong> over last 10 calls.
+    </div>
+
+    <div class="card">
+      <div class="cb-diagram">
+        <div class="cb-state cb-state-closed ${state === 'CLOSED' ? 'active' : ''}">
+          <span class="cb-state-icon">✅</span>
+          <span class="cb-state-name">Closed</span>
+          <span class="cb-state-desc">Normal — requests flow through</span>
+        </div>
+        <span class="cb-arrow">→</span>
+        <div class="cb-state cb-state-open ${state === 'OPEN' ? 'active' : ''}">
+          <span class="cb-state-icon">🚫</span>
+          <span class="cb-state-name">Open</span>
+          <span class="cb-state-desc">Failing — immediate fallback</span>
+        </div>
+        <span class="cb-arrow">→</span>
+        <div class="cb-state cb-state-half ${state === 'HALF_OPEN' ? 'active' : ''}">
+          <span class="cb-state-icon">🔶</span>
+          <span class="cb-state-name">Half-Open</span>
+          <span class="cb-state-desc">Testing recovery</span>
+        </div>
+      </div>
+
+      <div class="cb-stats">
+        <div class="cb-stat">
+          <div class="cb-stat-value" style="color:var(--success)">${State.cbSuccesses}</div>
+          <div class="cb-stat-label">Successes</div>
+        </div>
+        <div class="cb-stat">
+          <div class="cb-stat-value" style="color:var(--error)">${State.cbFailures}</div>
+          <div class="cb-stat-label">Failures</div>
+        </div>
+        <div class="cb-stat">
+          <div class="cb-stat-value" style="color:${state === 'CLOSED' ? 'var(--success)' : state === 'OPEN' ? 'var(--error)' : 'var(--warning)'}">${state}</div>
+          <div class="cb-stat-label">Circuit State</div>
+        </div>
+      </div>
+
+      <div class="btn-group">
+        <button class="btn btn-success" data-action="cbSend" data-fail="false">✓ Success Request</button>
+        <button class="btn btn-danger" data-action="cbSend" data-fail="true">✗ Fail Request</button>
+        <button class="btn btn-secondary" data-action="cbReset">Reset</button>
+      </div>
+      <div class="text-xs text-muted mt-8">
+        Tip: send 6+ fail requests to open the circuit. Then send a success — notice the immediate fallback response.
+      </div>
+    </div>
+
+    <div class="demo-grid">
+      <div class="card">
+        <div class="card-title">Event Log</div>
+        <div class="cb-log">${logHtml || '<span style="color:#475569">No events yet</span>'}</div>
+      </div>
+      <div class="card">
+        <div id="cb-response">${responseViewer(null)}</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">⏱️ Timeout Demo</div>
+      <div class="text-sm text-muted mb-8">Configured timeout: <strong>3 seconds</strong>. A &lt;3s delay succeeds; ≥3s triggers the fallback.</div>
+      <div class="flex gap-8 items-center" style="flex-wrap:wrap">
+        <div class="form-row" style="margin:0;flex:1;min-width:120px">
+          <label class="form-label">Delay (seconds)</label>
+          <input class="form-input" id="timeout-delay" type="number" value="2" min="0" max="8">
+        </div>
+        <button class="btn btn-primary" data-action="timeoutSend" style="margin-top:18px">Send →</button>
+      </div>
+      <div id="timeout-result" class="mt-12"></div>
+    </div>`;
+}
+
+function refreshCb(res) {
+  // Re-render only the CB-specific parts (avoid full page re-render which resets inputs)
+  const state = State.cbState;
+  const states = [
+    { key: 'CLOSED',    cls: 'cb-state-closed' },
+    { key: 'OPEN',      cls: 'cb-state-open' },
+    { key: 'HALF_OPEN', cls: 'cb-state-half' },
+  ];
+  document.querySelectorAll('.cb-state').forEach((el, i) => {
+    el.classList.toggle('active', states[i]?.key === state);
+  });
+  const vals = document.querySelectorAll('.cb-stat-value');
+  if (vals[0]) vals[0].textContent = State.cbSuccesses;
+  if (vals[1]) vals[1].textContent = State.cbFailures;
+  if (vals[2]) {
+    vals[2].textContent = state;
+    vals[2].style.color = state === 'CLOSED' ? 'var(--success)' : state === 'OPEN' ? 'var(--error)' : 'var(--warning)';
+  }
+  const logEl = document.querySelector('.cb-log');
+  if (logEl) {
+    const logHtml = State.cbLog.map(e => `
+      <div class="cb-log-entry">
+        <span class="cb-log-time">${e.time}</span>
+        <span class="${e.isFallback ? 'cb-log-fallback' : e.fail ? 'cb-log-failure' : 'cb-log-success'}">
+          ${e.isFallback ? '⚡ FALLBACK' : e.fail ? '✗ FAILURE' : '✓ SUCCESS'}
+        </span>
+      </div>`).join('');
+    logEl.innerHTML = logHtml || '<span style="color:#475569">No events yet</span>';
+  }
+}
+
+// ── PAGE: THIRD-PARTY APIS ───────────────────────────────────
+function thirdPartyPage() {
+  return `
+    <div class="page-title">🔌 Third-Party API Integration</div>
+    <div class="page-sub">Design patterns when your service consumes external providers — not just serves users.</div>
+
+    <div class="concept-box">
+      Integrating with providers inverts the usual model. <strong>You are the client</strong>, not the server.<br>
+      Authentication, error handling, rate limits, and availability are all controlled by someone else.
+      <table class="comparison-table" style="margin-top:12px">
+        <thead><tr><th></th><th>User-Facing API</th><th>Third-Party Integration</th></tr></thead>
+        <tbody>
+          <tr><td>Auth direction</td><td>Client → your API</td><td>You → provider (outbound)<br>Provider → your webhook (inbound)</td></tr>
+          <tr><td>Auth mechanism</td><td>JWT / session / API key</td><td>HMAC signature verify (inbound)<br>API key / OAuth2 (outbound)</td></tr>
+          <tr><td>Rate limits</td><td>You set them</td><td>Provider sets them — you obey</td></tr>
+          <tr><td>Availability SLA</td><td>You control</td><td>Provider controls — design for their outages</td></tr>
+          <tr><td>Error format</td><td>You standardize</td><td>Map provider errors → your domain</td></tr>
+          <tr><td>Schema changes</td><td>You control</td><td>Provider can change anytime — parse defensively</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="demo-grid">
+
+      <div class="card">
+        <div class="card-title">Pattern 1 — Webhook Receiver</div>
+        <div class="text-sm text-muted mb-8">
+          Providers POST events to your URL when something happens (payment succeeded, PR merged, etc.).
+          You must <strong>verify the signature</strong> on every request — otherwise anyone can POST fake events to your public URL.
+        </div>
+        <div class="alert alert-info text-sm">
+          Webhook secret for this demo: <code>whsec_demo_secret_12345</code><br>
+          Signature format: <code>X-Webhook-Signature: sha256=&lt;HMAC-SHA256(secret, timestamp.body)&gt;</code>
+        </div>
+        <div class="form-row">
+          <label class="form-label">Event type</label>
+          <select class="form-select" id="tp-event-type">
+            <option value="payment.completed">payment.completed</option>
+            <option value="payment.failed">payment.failed</option>
+            <option value="subscription.cancelled">subscription.cancelled</option>
+            <option value="user.created">user.created</option>
+          </select>
+        </div>
+        <div class="btn-group" style="flex-direction:column;gap:8px;margin-top:8px">
+          <button class="btn btn-primary btn-block" data-action="tpSendWebhook" data-tamper="false" data-replay="false">
+            ✓ Send valid signed webhook
+          </button>
+          <button class="btn btn-secondary btn-block" data-action="tpSendWebhook" data-tamper="true" data-replay="false">
+            ✗ Send tampered payload (signature fails)
+          </button>
+          <button class="btn btn-secondary btn-block" data-action="tpSendWebhook" data-tamper="false" data-replay="true">
+            ✗ Replay attack — old timestamp (rejected)
+          </button>
+        </div>
+        <div id="tp-webhook-result" class="mt-12">${responseViewer(null)}</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Received Event Log</div>
+        <div class="text-sm text-muted mb-8">
+          Events successfully verified and stored. Send webhooks on the left to populate this log.<br>
+          <strong>Idempotency:</strong> sending the same event twice is detected and skipped.
+        </div>
+        <div id="tp-event-log"><div class="text-muted text-sm">No events yet — send a webhook to see them here.</div></div>
+        <div class="divider"></div>
+        <div class="text-sm text-muted">
+          <strong>Production pattern:</strong><br>
+          1. Verify signature → reject immediately if invalid<br>
+          2. Check event ID → skip if already processed (idempotency)<br>
+          3. Store raw event to DB<br>
+          4. Return <code>200 OK</code> immediately<br>
+          5. Process event async (background job / queue)<br>
+          <br>
+          Never do heavy processing before the 200 — providers mark delivery
+          as failed if you take &gt;5s and will retry, causing duplicates.
+        </div>
+      </div>
+
+      <div class="card full-width">
+        <div class="card-title">Pattern 2 — Outbound API Call Scenarios</div>
+        <div class="text-sm text-muted mb-12">
+          Click each scenario to see the correct handling pattern. Each maps to a real provider error you will encounter.
+        </div>
+        <div class="btn-group" style="flex-wrap:wrap;gap:8px">
+          <button class="btn btn-secondary" data-action="tpOutbound" data-scenario="success">
+            ✓ Success
+          </button>
+          <button class="btn btn-secondary" data-action="tpOutbound" data-scenario="rate-limited">
+            429 Rate Limited
+          </button>
+          <button class="btn btn-secondary" data-action="tpOutbound" data-scenario="auth-failed">
+            401 Auth Failed
+          </button>
+          <button class="btn btn-secondary" data-action="tpOutbound" data-scenario="server-error">
+            503 Server Error
+          </button>
+          <button class="btn btn-secondary" data-action="tpOutbound" data-scenario="schema-drift">
+            Schema Drift
+          </button>
+        </div>
+        <div id="tp-outbound-result" class="mt-12">${responseViewer(null)}</div>
+      </div>
+
+    </div>
+
+    <div class="card">
+      <div class="card-title">Credential Management</div>
+      <table class="comparison-table">
+        <thead><tr><th>Practice</th><th>Bad</th><th>Good</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>Storage</td>
+            <td class="con">Hardcoded in source code or config files</td>
+            <td class="pro">Environment variable or secrets manager (Vault, AWS Secrets Manager)</td>
+          </tr>
+          <tr>
+            <td>Rotation</td>
+            <td class="con">Rotate by deleting old key — causes downtime</td>
+            <td class="pro">Activate new key → migrate traffic → revoke old (overlap window)</td>
+          </tr>
+          <tr>
+            <td>Scope</td>
+            <td class="con">One key with all permissions for all services</td>
+            <td class="pro">Per-service keys with minimum required permissions</td>
+          </tr>
+          <tr>
+            <td>Environments</td>
+            <td class="con">Same key in dev, staging, prod</td>
+            <td class="pro">Separate keys per environment — prod keys never leave prod</td>
+          </tr>
+          <tr>
+            <td>Logging</td>
+            <td class="con">Log full request headers (exposes key)</td>
+            <td class="pro">Redact Authorization headers and API key fields in logs</td>
+          </tr>
+          <tr>
+            <td>Monitoring</td>
+            <td class="con">Find out key was revoked when calls start failing</td>
+            <td class="pro">Alert on 401s from provider; set key expiry reminders</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Webhook Security Checklist</div>
+      <div class="triple-grid" style="gap:12px">
+        <div>
+          <div class="text-sm" style="font-weight:600;margin-bottom:6px">Signature Verification</div>
+          <ul class="text-sm text-muted" style="padding-left:18px;line-height:2">
+            <li>Verify HMAC on <em>every</em> request, no exceptions</li>
+            <li>Use constant-time comparison (not <code>===</code>)</li>
+            <li>Include timestamp in signed payload</li>
+            <li>Reject if timestamp is &gt; 5 min old</li>
+          </ul>
+        </div>
+        <div>
+          <div class="text-sm" style="font-weight:600;margin-bottom:6px">Idempotency</div>
+          <ul class="text-sm text-muted" style="padding-left:18px;line-height:2">
+            <li>Store event ID before processing</li>
+            <li>Check for duplicate event ID on arrival</li>
+            <li>Make all event handlers idempotent</li>
+            <li>Providers retry — expect duplicates</li>
+          </ul>
+        </div>
+        <div>
+          <div class="text-sm" style="font-weight:600;margin-bottom:6px">Reliability</div>
+          <ul class="text-sm text-muted" style="padding-left:18px;line-height:2">
+            <li>ACK with 200 in &lt; 5s always</li>
+            <li>Process async — never block the ACK</li>
+            <li>Handle out-of-order delivery</li>
+            <li>Expose a manual replay endpoint for recovery</li>
+          </ul>
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderEventLog(events) {
+  if (!events || events.length === 0) {
+    return '<div class="text-muted text-sm">No events received yet.</div>';
+  }
+  return events.map(e => `
+    <div class="cb-log-entry" style="margin-bottom:8px;padding:8px;background:var(--surface);border-radius:6px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+        <code style="font-size:11px">${e.type}</code>
+        <div>
+          ${e.duplicate ? '<span class="tag tag-yellow" style="font-size:10px">DUPLICATE</span>' : '<span class="tag tag-green" style="font-size:10px">NEW</span>'}
+          <span class="text-muted" style="font-size:10px;margin-left:6px">${e.receivedAt?.substring(11, 19) || ''}</span>
+        </div>
+      </div>
+      <code style="font-size:10px;color:var(--text-muted)">${e.eventId}</code>
+    </div>`).join('');
+}
+
+// ── PAGE: PARTNER INTEGRATION ─────────────────────────────────
+function partnerApiPage() {
+  return `
+    <div class="page-title">🤝 Partner Integration (B2B)</div>
+    <div class="page-sub">Designing your API to be consumed by third-party companies — not just end users.</div>
+
+    <div class="concept-box">
+      Opening your API to external companies introduces a fundamentally different set of concerns.
+      <strong>A partner integration is a contractual relationship</strong>, not a user session.
+      <table class="comparison-table" style="margin-top:12px">
+        <thead><tr><th></th><th>User-Facing API</th><th>B2B Partner API</th></tr></thead>
+        <tbody>
+          <tr><td>Identity unit</td><td>Individual user (JWT per session)</td><td>Organization (long-lived API key)</td></tr>
+          <tr><td>Rate limits</td><td>Per IP or per user</td><td>Per partner, tiered by contract</td></tr>
+          <tr><td>Data access</td><td>Own records only</td><td>Tenant-scoped subset</td></tr>
+          <tr><td>Breaking changes</td><td>Notify users, soft-launch</td><td>6–12 month deprecation period</td></tr>
+          <tr><td>Audit trail</td><td>Session logs</td><td>Immutable, per-partner, compliance-grade</td></tr>
+          <tr><td>Event delivery</td><td>Optional webhooks</td><td>You push signed events to partner URLs</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Select Partner Key</div>
+      <div class="flex gap-16" style="flex-wrap:wrap;align-items:flex-end">
+        <div class="form-row" style="margin:0;flex:1;min-width:240px">
+          <label class="form-label">X-Partner-Key</label>
+          <select class="form-select" id="partner-key">
+            <option value="partner-alpha-key-12345">partner-alpha-key-12345 → Alpha Corp (PREMIUM)</option>
+            <option value="partner-beta-key-12345">partner-beta-key-12345 → Beta Inc (STANDARD)</option>
+            <option value="partner-gamma-key-12345">partner-gamma-key-12345 → Gamma LLC (FREE)</option>
+            <option value="invalid-key">invalid-key → Should return 401</option>
+          </select>
+        </div>
+      </div>
+      <div class="text-sm text-muted mt-8">
+        All requests below use this key. Switch keys to see how tier affects scopes, quota, and data access.
+      </div>
+    </div>
+
+    <div class="demo-grid">
+
+      <div class="card">
+        <div class="card-title">1. Partner Auth Info</div>
+        <div class="text-sm text-muted mb-8">
+          Identifies the partner organization, tier, and granted scopes.<br>
+          Notice how <strong>Alpha Corp</strong> gets 5 scopes vs <strong>Gamma LLC</strong>'s 1 scope.
+        </div>
+        <button class="btn btn-primary btn-block" data-action="partnerFetch" data-endpoint="/api/partner/auth-info">
+          GET /api/partner/auth-info →
+        </button>
+        <div id="partner-auth-result" class="mt-12">${responseViewer(null)}</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">2. Tenant-Isolated Catalog</div>
+        <div class="text-sm text-muted mb-8">
+          Same endpoint, different data per partner — this is <strong>tenant isolation</strong>.<br>
+          Alpha sees 3 items, Beta sees 2, Gamma sees 1. Gamma FREE tier needs <code>catalog:read</code> scope (which it has).
+          FREE tier does NOT have <code>orders:read</code> scope — try the quota demo for that.
+        </div>
+        <button class="btn btn-primary btn-block" data-action="partnerFetch" data-endpoint="/api/partner/catalog">
+          GET /api/partner/catalog →
+        </button>
+        <div id="partner-catalog-result" class="mt-12">${responseViewer(null)}</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">3. Quota &amp; Tiered Rate Limits</div>
+        <div class="text-sm text-muted mb-8">
+          Rate limits by partner ID (not by IP — partners may call from multiple servers).<br>
+          Tiers: FREE 100/min, STANDARD 1,000/min, PREMIUM 10,000/min.<br>
+          Quota info surfaces in <code>X-RateLimit-*</code> response headers.
+        </div>
+        <button class="btn btn-primary btn-block" data-action="partnerFetch" data-endpoint="/api/partner/quota">
+          GET /api/partner/quota →
+        </button>
+        <div id="partner-quota-result" class="mt-12">${responseViewer(null)}</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">4. Audit Log</div>
+        <div class="text-sm text-muted mb-8">
+          Immutable per-partner call trail — required for compliance (SOC 2, PCI-DSS).<br>
+          Only <strong>PREMIUM</strong> (Alpha) has <code>analytics:read</code> scope to view the audit log.<br>
+          Try with Beta or Gamma key — you'll get <code>403 INSUFFICIENT_SCOPE</code>.
+        </div>
+        <button class="btn btn-primary btn-block" data-action="partnerFetch" data-endpoint="/api/partner/audit">
+          GET /api/partner/audit →
+        </button>
+        <div id="partner-audit-result" class="mt-12">${responseViewer(null)}</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">5. API Versioning Contract</div>
+        <div class="text-sm text-muted mb-8">
+          With B2B partners, breaking changes require <strong>6–12 months notice</strong>.<br>
+          <code>Deprecation</code> header warns the integration is retiring.<br>
+          <code>Sunset</code> gives the exact retirement date (RFC 8594).<br>
+          <code>Link</code> points to the successor version or migration guide.
+        </div>
+        <div class="btn-group">
+          <button class="btn btn-secondary" data-action="partnerVersionFetch" data-version="v1">
+            GET /v1/items (deprecated)
+          </button>
+          <button class="btn btn-primary" data-action="partnerVersionFetch" data-version="v2">
+            GET /v2/items (current)
+          </button>
+        </div>
+        <div id="partner-version-result" class="mt-12">${responseViewer(null)}</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">6. Outbound Webhook Dispatch</div>
+        <div class="text-sm text-muted mb-8">
+          Your system pushes signed events to the partner's registered callback URL.<br>
+          This is the <em>inverse</em> of webhook receiving (Third-Party APIs section):<br>
+          you generate the signature, the partner verifies it.<br>
+          Requires <code>orders:write</code> or <code>catalog:write</code> scope — Alpha and Beta only.
+        </div>
+        <div class="form-row">
+          <label class="form-label">Event type</label>
+          <select class="form-select" id="partner-event-type">
+            <option value="order.created">order.created</option>
+            <option value="inventory.low">inventory.low</option>
+          </select>
+        </div>
+        <button class="btn btn-primary btn-block mt-8" data-action="partnerDispatchWebhook">
+          Dispatch webhook to partner callback →
+        </button>
+        <div id="partner-webhook-result" class="mt-12">${responseViewer(null)}</div>
+      </div>
+
+    </div>
+
+    <div class="card">
+      <div class="card-title">Partner Onboarding Checklist</div>
+      <div class="triple-grid" style="gap:12px">
+        <div>
+          <div class="text-sm" style="font-weight:600;margin-bottom:6px">Authentication</div>
+          <ul class="text-sm text-muted" style="padding-left:18px;line-height:2">
+            <li>Issue per-partner API keys (not shared)</li>
+            <li>Hash keys in DB — never store plaintext</li>
+            <li>Support 2 active keys per partner (rotation)</li>
+            <li>Alert ops on sustained 401s from a partner</li>
+          </ul>
+        </div>
+        <div>
+          <div class="text-sm" style="font-weight:600;margin-bottom:6px">Data &amp; Access</div>
+          <ul class="text-sm text-muted" style="padding-left:18px;line-height:2">
+            <li>Enforce tenant isolation on every query</li>
+            <li>Assign scopes at provisioning, not per-request</li>
+            <li>Provide a sandbox environment with test data</li>
+            <li>Separate prod and sandbox keys</li>
+          </ul>
+        </div>
+        <div>
+          <div class="text-sm" style="font-weight:600;margin-bottom:6px">Contracts &amp; Reliability</div>
+          <ul class="text-sm text-muted" style="padding-left:18px;line-height:2">
+            <li>Deprecation header on every old-version response</li>
+            <li>Sunset date ≥ 6 months out (12 for enterprise)</li>
+            <li>Sign outbound webhooks with per-partner secret</li>
+            <li>Retry webhook delivery with exponential backoff</li>
+          </ul>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ── PAGE: HANGING APIS ───────────────────────────────────────
+function hangingApisPage() {
+  return `
+    <div class="page-title">⏳ Handling Hanging API Calls</div>
+    <div class="page-sub">What happens when a downstream service stops responding — and how to protect against it.</div>
+
+    <div class="concept-box">
+      A hanging API call holds a server thread for its entire duration. Tomcat's default thread pool is
+      <strong>200 threads</strong>. With 200 concurrent hanging calls your server stops responding to
+      <em>everything</em> — not just requests to the slow service.<br><br>
+      <strong>Two levels of protection you always need:</strong><br>
+      &nbsp;1. <strong>Caller-side</strong> — HTTP client timeouts (connect + read)<br>
+      &nbsp;2. <strong>Server-side</strong> — deadline on the async work itself (so threads are freed)
+    </div>
+
+    <div class="card">
+      <div class="card-title">Configure the Experiment</div>
+      <div class="flex gap-16" style="flex-wrap:wrap;align-items:flex-end">
+        <div class="form-row" style="margin:0;min-width:160px">
+          <label class="form-label">Downstream delay (s)</label>
+          <input class="form-input" id="hanging-delay" type="number" value="5" min="1" max="15">
+        </div>
+        <div class="form-row" style="margin:0;min-width:160px">
+          <label class="form-label">Deadline / timeout (s)</label>
+          <input class="form-input" id="hanging-deadline" type="number" value="3" min="1" max="10">
+        </div>
+        <div id="hanging-timer" style="min-width:140px"></div>
+      </div>
+    </div>
+
+    <div class="triple-grid">
+
+      <div class="card">
+        <div class="card-title">❌ Approach 1 — No Protection</div>
+        <div class="text-sm text-muted mb-8">
+          <code>Thread.sleep(delay)</code> blocks the Tomcat request thread for the full duration.
+          Set delay=10 and notice: <em>your browser hangs for 10 seconds</em>.
+        </div>
+        <div class="alert alert-error text-sm">
+          200 concurrent hangs = thread pool exhausted = server freeze.
+        </div>
+        <button class="btn btn-danger btn-block mt-8" data-action="hangingSend" data-approach="no-timeout">
+          Send (no timeout) →
+        </button>
+        <div class="text-sm text-muted mt-8">
+          <strong>Endpoint:</strong> <code>/api/hanging/no-timeout?delay=N</code><br>
+          <strong>Thread impact:</strong> 1 thread blocked for N seconds<br>
+          <strong>Response time:</strong> always N seconds
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">✅ Approach 2 — CompletableFuture Deadline</div>
+        <div class="text-sm text-muted mb-8">
+          Java 9+ built-in: <code>CompletableFuture.orTimeout(deadline, SECONDS)</code>.
+          Work runs in an executor thread; if the deadline passes, the caller gets a fast 504.
+        </div>
+        <div class="alert alert-success text-sm">
+          Caller freed after deadline seconds regardless of how slow downstream is.
+        </div>
+        <button class="btn btn-primary btn-block mt-8" data-action="hangingSend" data-approach="deadline">
+          Send (with deadline) →
+        </button>
+        <div class="text-sm text-muted mt-8">
+          <strong>Endpoint:</strong> <code>/api/hanging/with-deadline?delay=N&deadline=N</code><br>
+          <strong>Thread impact:</strong> request thread freed at deadline<br>
+          <strong>Response time:</strong> min(delay, deadline) seconds
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">✅ Approach 3 — HTTP Client Timeouts</div>
+        <div class="text-sm text-muted mb-8">
+          Configure <code>connectTimeout</code> and per-request <code>timeout</code> on the HTTP client.
+          This endpoint calls <code>/api/hanging/no-timeout</code> using a Java HttpClient.
+        </div>
+        <div class="alert alert-warning text-sm">
+          ⚠ Client timeout cancels <em>the caller's wait</em> — the server-side thread keeps running.
+          Read the response to see both effects.
+        </div>
+        <button class="btn btn-secondary btn-block mt-8" data-action="hangingSend" data-approach="http-client">
+          Send (HTTP client) →
+        </button>
+        <div class="text-sm text-muted mt-8">
+          <strong>Endpoint:</strong> <code>/api/hanging/http-client?delay=N&timeout=N</code><br>
+          <strong>Connect timeout:</strong> 2s (hardcoded)<br>
+          <strong>Request timeout:</strong> deadline input above
+        </div>
+      </div>
+
+    </div>
+
+    <div id="hanging-result" class="mt-8">${responseViewer(null)}</div>
+
+    <div class="card mt-16">
+      <div class="card-title">Strategy Comparison</div>
+      <table class="comparison-table">
+        <thead>
+          <tr><th>Strategy</th><th>Frees request thread?</th><th>Cancels server work?</th><th>Complexity</th><th>Best for</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>No protection</td>
+            <td><span class="con">✗ Never</span></td>
+            <td><span class="con">✗ N/A</span></td>
+            <td>None</td>
+            <td>⚠ Don't use</td>
+          </tr>
+          <tr>
+            <td><code>CompletableFuture.orTimeout()</code></td>
+            <td><span class="pro">✓ At deadline</span></td>
+            <td><span class="con">✗ Task may linger</span></td>
+            <td>Low</td>
+            <td>Simple service calls</td>
+          </tr>
+          <tr>
+            <td>HTTP client timeouts</td>
+            <td><span class="pro">✓ At timeout</span></td>
+            <td><span class="con">✗ Server thread runs on</span></td>
+            <td>Low</td>
+            <td>Calling external services</td>
+          </tr>
+          <tr>
+            <td><code>@TimeLimiter</code> (Resilience4j)</td>
+            <td><span class="pro">✓ At timeout</span></td>
+            <td><span class="pro">✓ Future cancelled</span></td>
+            <td>Medium</td>
+            <td>Production services + fallback</td>
+          </tr>
+          <tr>
+            <td><code>@CircuitBreaker</code> (Resilience4j)</td>
+            <td><span class="pro">✓ Immediately</span></td>
+            <td><span class="pro">✓ No call made</span></td>
+            <td>Medium</td>
+            <td>Repeatedly failing downstream</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="divider"></div>
+      <div class="card-title text-sm">The Two-Timeout Rule</div>
+      <div class="text-sm text-muted" style="line-height:1.8">
+        <strong>Connect timeout</strong> — guards against unreachable hosts (DNS failure, firewall drop).<br>
+        <strong>Read/request timeout</strong> — guards against a host that accepts the connection but then hangs.<br><br>
+        Both must be set. A read timeout without a connect timeout leaves you vulnerable to dead hosts.
+        A connect timeout without a read timeout leaves you vulnerable to slow responses.
+      </div>
+    </div>`;
+}
+
+// ── PAGE: PAGINATION ──────────────────────────────────────────
+function paginationPage() {
+  return `
+    <div class="page-title">📄 Pagination</div>
+    <div class="page-sub">Always paginate — returning all records is a memory and performance anti-pattern.</div>
+
+    <div class="concept-box">
+      Spring Data's <code>Pageable</code>: <code>?page=0&size=6&sort=price,asc</code><br>
+      Always return pagination metadata: <code>currentPage, totalPages, totalElements, hasNext, hasPrevious</code><br>
+      Cap the <code>size</code> parameter server-side (max 100) to prevent abuse.
+    </div>
+
+    <div class="card">
+      <div class="filter-bar">
+        <div class="form-row">
+          <label class="form-label">Category</label>
+          <select class="form-select" id="filter-category">
+            <option value="">All categories</option>
+            <option value="Electronics">Electronics</option>
+            <option value="Books">Books</option>
+            <option value="Clothing">Clothing</option>
+            <option value="Sports">Sports</option>
+            <option value="Kitchen">Kitchen</option>
+            <option value="Toys">Toys</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label class="form-label">Search</label>
+          <input class="form-input" id="filter-search" placeholder="Product name..." data-enter="paginationFilter">
+        </div>
+        <button class="btn btn-primary" data-action="paginationFilter" style="margin-top:18px">Filter</button>
+        <button class="btn btn-secondary" data-action="paginationLoad" style="margin-top:18px">Refresh</button>
+      </div>
+
+      <div id="product-grid" class="product-grid">
+        <div class="text-muted text-sm">Loading products…</div>
+      </div>
+
+      <div id="pagination-meta" class="pagination-info text-center"></div>
+      <div class="pagination-controls">
+        <button class="page-btn" data-action="paginationPrev">‹ Prev</button>
+        <div id="pagination-pages" style="display:flex;gap:6px"></div>
+        <button class="page-btn" data-action="paginationNext">Next ›</button>
+      </div>
+    </div>`;
+}
+
+function renderProductGrid(data) {
+  if (!data.content || data.content.length === 0) {
+    return '<div class="text-muted text-sm">No products found.</div>';
+  }
+  return data.content.map(p => `
+    <div class="product-card">
+      <span class="product-category">${p.category}</span>
+      <div class="product-name">${p.name}</div>
+      <div class="product-price">$${p.price.toFixed(2)}</div>
+      <div class="product-stock">${p.stock} in stock</div>
+    </div>`).join('');
+}
+
+function renderPaginationButtons(data) {
+  const container = document.getElementById('pagination-pages');
+  if (!container) return;
+  const pages = Math.min(data.totalPages, 7);
+  let html = '';
+  for (let i = 0; i < pages; i++) {
+    html += `<button class="page-btn${i === data.currentPage ? ' current' : ''}"
+      onclick="State.paginationPage=${i};handlers.paginationLoad()">${i + 1}</button>`;
+  }
+  container.innerHTML = html;
+}
+
+// ── PAGE: VERSIONING ──────────────────────────────────────────
+function versioningPage() {
+  return `
+    <div class="page-title">📦 API Versioning</div>
+    <div class="page-sub">Four strategies for evolving APIs without breaking existing clients.</div>
+
+    <div class="concept-box">
+      When you change field names, types, or remove endpoints, existing clients break.<br>
+      Versioning lets you introduce breaking changes under a new version while old clients keep working.<br>
+      Compare V1 <code>{"price": 9.99}</code> vs V2 <code>{"price": {"amount": 9.99, "currency": "USD"}}</code>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Select Strategy</div>
+      <div class="flex gap-8 items-center" style="flex-wrap:wrap">
+        <div class="form-row" style="margin:0;flex:1;min-width:180px">
+          <label class="form-label">Versioning Strategy</label>
+          <select class="form-select" id="version-strategy">
+            <option value="uri">URI Path (/api/v1/items)</option>
+            <option value="header">Request Header (X-API-Version)</option>
+            <option value="query">Query Parameter (?version=1)</option>
+            <option value="accept">Accept Header (application/vnd.demo.v1+json)</option>
+          </select>
+        </div>
+        <button class="btn btn-secondary" data-action="versionFetch" data-version="1" style="margin-top:18px">Fetch V1</button>
+        <button class="btn btn-primary"   data-action="versionFetch" data-version="2" style="margin-top:18px">Fetch V2</button>
+      </div>
+    </div>
+
+    <div class="version-compare">
+      <div class="card">
+        <div class="card-title"><span class="version-badge version-v1">V1</span> Response</div>
+        <div id="version-v1-response">${responseViewer(null, 'V1 — click Fetch V1')}</div>
+      </div>
+      <div class="card">
+        <div class="card-title"><span class="version-badge version-v2">V2</span> Response</div>
+        <div id="version-v2-response">${responseViewer(null, 'V2 — click Fetch V2')}</div>
+        <div class="alert alert-warning text-sm mt-8">
+          Breaking change: <code>price</code> changed from a <code>number</code> to an <code>object</code>.
+          V1 clients parsing <code>res.price * 1.1</code> would break on V2.
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Strategy Comparison</div>
+      <table class="comparison-table">
+        <thead><tr><th>Strategy</th><th>Example</th><th>Pros</th><th>Cons</th></tr></thead>
+        <tbody>
+          <tr>
+            <td>URI Path</td>
+            <td><code>/api/v2/items</code></td>
+            <td><span class="pro">✓</span> Visible, cacheable, easy to test</td>
+            <td><span class="con">✗</span> Version in URL violates REST</td>
+          </tr>
+          <tr>
+            <td>Query Param</td>
+            <td><code>?version=2</code></td>
+            <td><span class="pro">✓</span> Backward-compatible default</td>
+            <td><span class="con">✗</span> Easy to forget, cache complications</td>
+          </tr>
+          <tr>
+            <td>Header</td>
+            <td><code>X-API-Version: 2</code></td>
+            <td><span class="pro">✓</span> Clean URLs</td>
+            <td><span class="con">✗</span> Not visible in browser, hard to bookmark</td>
+          </tr>
+          <tr>
+            <td>Accept Header</td>
+            <td><code>application/vnd.demo.v2+json</code></td>
+            <td><span class="pro">✓</span> Most RESTful (content negotiation)</td>
+            <td><span class="con">✗</span> Complex, hard to test manually</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>`;
+}
+
+// ── PAGE: ERRORS ──────────────────────────────────────────────
+function errorsPage() {
+  return `
+    <div class="page-title">⚠️ Error Handling</div>
+    <div class="page-sub">RFC 7807 Problem Details — consistent, safe, structured error responses.</div>
+
+    <div class="concept-box">
+      Good errors: <strong>correct HTTP status</strong> + <strong>consistent format</strong> + <strong>no internal details leaked</strong>.<br>
+      Spring Boot 3 supports <code>ProblemDetail</code> natively — all errors in this app use it.<br>
+      <code>{"type":"/errors/not-found","title":"Not Found","status":404,"detail":"..."}</code>
+    </div>
+
+    <div class="demo-grid">
+      <div class="card">
+        <div class="card-title">Trigger Error Scenarios</div>
+        <div class="btn-group" style="flex-direction:column;gap:10px">
+          <button class="btn btn-secondary" data-action="errorTrigger"
+            data-endpoint="/api/errors/400?input=" data-method="GET">
+            400 Bad Request — missing required param
+          </button>
+          <button class="btn btn-secondary" data-action="errorTrigger"
+            data-endpoint="/api/errors/404?id=999" data-method="GET">
+            404 Not Found — resource doesn't exist
+          </button>
+          <button class="btn btn-secondary" data-action="errorTrigger"
+            data-endpoint="/api/errors/409" data-method="GET">
+            409 Conflict — duplicate resource
+          </button>
+          <button class="btn btn-secondary" data-action="errorTrigger"
+            data-endpoint="/api/errors/500" data-method="GET">
+            500 Internal Server Error — safe handling
+          </button>
+          <button class="btn btn-secondary" data-action="errorTrigger"
+            data-endpoint="/api/errors/validate" data-method="POST"
+            data-body='{}'>
+            422 Validation Error — @Valid fails
+          </button>
+          <button class="btn btn-secondary" data-action="errorTrigger"
+            data-endpoint="/api/basic/admin" data-method="GET"
+            data-basic-auth="user:password">
+            403 Forbidden — authenticated as user, ADMIN required
+          </button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div id="error-response">${responseViewer(null)}</div>
+        <div class="divider"></div>
+        <div class="card-title text-sm">Security: Never Leak Internals</div>
+        <div class="alert alert-error text-sm">
+          <strong>BAD:</strong> <code>PSQLException: duplicate key violates constraint on table users at jdbc:mysql://prod-db:3306</code><br>
+          Reveals DB type, hostname, schema details.
+        </div>
+        <div class="alert alert-success text-sm">
+          <strong>GOOD:</strong> <code>An account with this email already exists.</code><br>
+          Client gets actionable info; internals stay server-side in logs.
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">HTTP Status Code Guide</div>
+      <table class="comparison-table">
+        <thead><tr><th>Code</th><th>Name</th><th>When to use</th></tr></thead>
+        <tbody>
+          <tr><td><span class="tag tag-green">200</span></td><td>OK</td><td>Successful GET, PUT, PATCH</td></tr>
+          <tr><td><span class="tag tag-green">201</span></td><td>Created</td><td>Successful POST — include <code>Location</code> header</td></tr>
+          <tr><td><span class="tag tag-green">204</span></td><td>No Content</td><td>Successful DELETE or action with no body</td></tr>
+          <tr><td><span class="tag tag-red">400</span></td><td>Bad Request</td><td>Invalid input, missing required fields</td></tr>
+          <tr><td><span class="tag tag-red">401</span></td><td>Unauthorized</td><td>Not authenticated (no/invalid credentials)</td></tr>
+          <tr><td><span class="tag tag-red">403</span></td><td>Forbidden</td><td>Authenticated but not authorized</td></tr>
+          <tr><td><span class="tag tag-red">404</span></td><td>Not Found</td><td>Resource doesn't exist</td></tr>
+          <tr><td><span class="tag tag-red">409</span></td><td>Conflict</td><td>Duplicate, version mismatch, state conflict</td></tr>
+          <tr><td><span class="tag tag-red">422</span></td><td>Unprocessable Entity</td><td>Validation failed</td></tr>
+          <tr><td><span class="tag tag-yellow">429</span></td><td>Too Many Requests</td><td>Rate limit exceeded — include Retry-After</td></tr>
+          <tr><td><span class="tag tag-red">500</span></td><td>Internal Server Error</td><td>Server bug — log internally, return generic message</td></tr>
+          <tr><td><span class="tag tag-red">503</span></td><td>Service Unavailable</td><td>Circuit open, maintenance — include Retry-After</td></tr>
+        </tbody>
+      </table>
+    </div>`;
+}
+
+// ── DOM HELPERS ───────────────────────────────────────────────
+function val(id) {
+  const el = document.getElementById(id);
+  return el ? el.value.trim() : '';
+}
+function setHtml(id, html) {
+  const el = document.getElementById(id);
+  if (el) el.innerHTML = html;
+}
+function setLoading(btn, loading) {
+  if (loading) { btn.classList.add('btn-loading'); btn.disabled = true; }
+  else          { btn.classList.remove('btn-loading'); btn.disabled = false; }
+}
+function flashError(msg) {
+  const el = document.createElement('div');
+  el.className = 'alert alert-error text-sm';
+  el.textContent = msg;
+  el.style.cssText = 'position:fixed;top:16px;right:16px;z-index:9999;max-width:300px';
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 3000);
+}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ── INIT ─────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  const page = location.hash.slice(1) || 'home';
+  State.page = page;
+  document.querySelectorAll('.nav-item').forEach(el => {
+    el.classList.toggle('active', el.dataset.page === page);
+  });
+  render();
+});
+
+// Watch for pagination page renders
+const origRender = render;
+window.render = function() {
+  origRender();
+  if (State.page === 'pagination') {
+    setTimeout(() => handlers.paginationLoad(), 50);
+  }
+};

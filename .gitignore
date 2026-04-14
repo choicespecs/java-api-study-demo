@@ -1,0 +1,49 @@
+# ── Build output ─────────────────────────────────────────────
+target/
+*.class
+*.jar
+*.war
+
+# ── Maven wrapper cache ───────────────────────────────────────
+.mvn/repository/
+
+# ── IDE — IntelliJ IDEA ───────────────────────────────────────
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# ── IDE — VS Code ─────────────────────────────────────────────
+.vscode/
+*.code-workspace
+
+# ── IDE — Eclipse ─────────────────────────────────────────────
+.project
+.classpath
+.settings/
+bin/
+
+# ── macOS ─────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ── Logs ──────────────────────────────────────────────────────
+*.log
+logs/
+spring.log
+
+# ── Local config overrides ────────────────────────────────────
+# Use application-local.yml for secrets / local DB URLs that
+# should never be committed. application.yml is tracked.
+application-local.yml
+application-local.yaml
+.env
+.env.*
+!.env.example
+
+# ── H2 persisted database (if switched from mem: to file:) ───
+*.db
+*.mv.db
+*.trace.db
