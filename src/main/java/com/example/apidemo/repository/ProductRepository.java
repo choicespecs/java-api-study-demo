@@ -8,10 +8,13 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.math.BigDecimal;
+import java.util.Optional;
 
 public interface ProductRepository extends JpaRepository<Product, Long> {
 
     Page<Product> findByCategory(String category, Pageable pageable);
+
+    Optional<Product> findByName(String name);
 
     /**
      * CONCEPT: Dynamic filtering with JPQL
