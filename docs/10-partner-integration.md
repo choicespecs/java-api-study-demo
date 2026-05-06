@@ -53,6 +53,19 @@ X-Partner-Key: partner-alpha-key-12345
 
 Separate from `X-API-Key` (user API keys). Using a distinct header prevents mixing user-facing and partner-facing traffic in logs and routing rules.
 
+### Why API Keys Alone Are Not Enough
+
+An API key in a header proves the caller *knows the key* — it does not prove the request was not tampered with, is not a replay, or came from an authorized source. These risks persist even over HTTPS:
+
+| Risk | What Happens | Mitigation |
+|------|-------------|------------|
+| **Key leakage** | Partner embeds key in source code or CI/CD logs — compromised without a breach of your system | HMAC signing: knowing the key alone is not enough without the signing secret |
+| **Replay attack** | Attacker captures a valid request and resends it unchanged — the API key is still valid | HMAC + timestamp: server rejects requests where `|now − timestamp| > 300s` |
+| **Body tampering** | Body is modified in transit; the key header is preserved — the API key covers identity, not payload integrity | HMAC signs the full request body — any modification invalidates the signature |
+| **Impersonation** | Any client that learns the key can call your API — the key proves knowledge of a secret, not caller identity | mTLS: client must present a certificate at the TLS handshake level |
+
+Real enterprise integrations layer at least three of the mechanisms described in the sections below.
+
 ---
 
 ## Pattern 2: Tenant Isolation
@@ -228,6 +241,203 @@ Use a **per-partner secret** (not a global secret). If one partner's secret is c
 
 ---
 
+## HMAC Request Signing
+
+Partners sign every inbound request with HMAC-SHA256 using a shared signing secret. The server recomputes the expected signature and rejects any mismatch. This is distinct from outbound webhook signing (Pattern 5) — here, *partners sign their requests to you*.
+
+### What Gets Signed
+
+```
+Canonical string: METHOD + "\n" + PATH + "\n" + TIMESTAMP + "\n" + SHA256(rawBody)
+
+Example:
+POST
+/api/partner/orders
+1704067200
+ba7816bf8f01cfea414140de5dae2ec73b00361bbef0469df84c6a2d3a6afbe
+```
+
+### Why Each Component Matters
+
+| Component | Reason |
+|-----------|--------|
+| `METHOD` | Prevents a signed POST from being replayed as a GET on the same path |
+| `PATH` | Prevents cross-endpoint replay (same body, different endpoint) |
+| `TIMESTAMP` | Replay protection — server rejects `|now − timestamp| > 300s` |
+| `SHA256(body)` | Body tamper detection — any modification to the body changes the hash |
+
+### Server-Side Verification (Java)
+
+```java
+@PostMapping("/orders")
+public ResponseEntity<?> createOrder(
+        @RequestHeader("X-Partner-Key") String partnerKey,
+        @RequestHeader("X-Timestamp") long timestamp,
+        @RequestHeader("X-Signature") String incomingSignature,
+        @RequestBody String rawBody,
+        HttpServletRequest request) {
+
+    // 1. Reject stale requests (replay protection)
+    long now = Instant.now().getEpochSecond();
+    if (Math.abs(now - timestamp) > 300) {
+        return ResponseEntity.status(401)
+            .body(Map.of("error", "Request expired — timestamp outside 5-minute window"));
+    }
+
+    // 2. Resolve partner and rebuild the canonical signed string
+    Partner partner = partnerService.resolve(partnerKey);
+    String canonical = request.getMethod() + "\n"
+        + request.getRequestURI() + "\n"
+        + timestamp + "\n"
+        + sha256Hex(rawBody);
+
+    // 3. Recompute expected signature
+    String expected = "sha256=" + hmacSha256(partner.getSigningSecret(), canonical);
+
+    // 4. Constant-time comparison — never String.equals() (timing attack)
+    if (!MessageDigest.isEqual(expected.getBytes(), incomingSignature.getBytes())) {
+        return ResponseEntity.status(401)
+            .body(Map.of("error", "Invalid signature — request may have been tampered with"));
+    }
+
+    return ResponseEntity.status(201).body(orderService.create(partner, rawBody));
+}
+
+private String sha256Hex(String data) throws NoSuchAlgorithmException {
+    MessageDigest digest = MessageDigest.getInstance("SHA-256");
+    return HexFormat.of().formatHex(
+        digest.digest(data.getBytes(StandardCharsets.UTF_8)));
+}
+
+private String hmacSha256(String secret, String data) {
+    try {
+        Mac mac = Mac.getInstance("HmacSHA256");
+        mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+        return HexFormat.of().formatHex(mac.doFinal(data.getBytes(StandardCharsets.UTF_8)));
+    } catch (Exception e) {
+        throw new RuntimeException(e);
+    }
+}
+```
+
+### Key Rules
+
+```
+✓ Use a separate signing secret per partner (not the API key itself)
+✓ Reject |now − timestamp| > 300 seconds — 5-minute replay window
+✓ Always use MessageDigest.isEqual() — never String.equals() (timing attack)
+✓ Sign the raw request body before any JSON parsing (parsing may normalize whitespace)
+✓ Include HTTP method and full path in the canonical string (prevents cross-endpoint replay)
+✗ Never log the signing secret
+```
+
+---
+
+## Mutual TLS (mTLS)
+
+Standard TLS has the server prove its identity to the client. Mutual TLS requires *both* sides to authenticate — the client must present a certificate signed by your CA at the TLS handshake, before a single HTTP byte is processed by your application.
+
+### Standard TLS vs Mutual TLS
+
+| | Standard TLS | Mutual TLS |
+|--|-------------|-----------|
+| Server cert required | ✓ | ✓ |
+| Client cert required | ✗ | ✓ |
+| Enforced at | TLS handshake (server only) | TLS handshake (before your code runs) |
+| Stops | Eavesdropping | Eavesdropping + unauthorized connections |
+| Revocation | Not applicable | CRL / OCSP — immediate, no deploy needed |
+| Onboarding cost | None | Certificate issuance + lifecycle management |
+
+### How It Works
+
+```
+Partner onboarding:
+1. You issue a client certificate signed by your CA (or partner provides a CSR and you sign it)
+2. Partner configures their HTTP client to present the cert on every request
+3. Your API gateway rejects connections without a valid cert at the TLS layer
+4. Gateway injects X-Client-Cert-DN (Distinguished Name) into the upstream request
+5. Your application maps the DN to a partner identity — no client self-reporting trusted
+
+Revocation:
+  Revoke via CRL/OCSP — effective immediately across all load balancer nodes
+  without a code deploy or configuration change
+```
+
+### Gateway + Application Configuration
+
+```nginx
+# nginx: enforce client cert at TLS layer, inject DN for application use
+ssl_client_certificate /etc/ssl/partner-ca.crt;
+ssl_verify_client       on;
+proxy_set_header X-Client-Cert-DN $ssl_client_s_dn;
+```
+
+```java
+// Spring: read the DN injected by the gateway
+// Never trust a client-supplied X-Client-Cert-DN header — always sourced from gateway
+@GetMapping("/orders")
+public ResponseEntity<?> getOrders(
+        @RequestHeader("X-Client-Cert-DN") String certDn) {
+    // certDn: "CN=alpha-corp,O=Alpha Corp,C=US"
+    Partner partner = partnerService.resolveByDn(certDn);
+    return ResponseEntity.ok(partnerService.getOrders(partner));
+}
+```
+
+```
+Use mTLS when:
+  ✓ Partners are enterprises with dedicated IT teams who can manage cert rotation
+  ✓ Compliance requires cryptographic proof of client identity (PCI-DSS, HIPAA)
+  ✓ Defense-in-depth against stolen API keys is required
+
+Skip mTLS when:
+  ✗ Partners are small teams who cannot manage certificate lifecycle
+  ✗ Early-stage product — mTLS adds real onboarding friction
+  ✗ HMAC request signing already meets your threat model
+```
+
+---
+
+## IP Allowlisting
+
+Partners register their egress IP ranges at onboarding. Requests from non-allowlisted IPs are rejected at the load balancer — before reaching your application.
+
+```
+Onboarding flow:
+  Partner provides: "Alpha Corp will call from 203.0.113.0/24 and 198.51.100.45"
+  You configure:    allowlist those CIDRs for partner-alpha-key-12345 at the load balancer
+  Effect:           Any request from an unregistered IP is dropped with 403 before auth is attempted
+
+Rules:
+  ✓ Reject at the edge (load balancer / API gateway), not in application code
+  ✓ Require partners to use static egress IPs (NAT gateway), not developer workstation IPs
+  ✓ Treat IP range updates as a change request — partner contacts you, you approve; never self-service
+  ✓ Combine with API key + HMAC: a stolen key from an unregistered IP is blocked before authentication
+  ✗ Does not protect against an attacker who has compromised a server inside the partner's allowlisted range
+```
+
+---
+
+## Defense in Depth
+
+No single layer is sufficient. Real enterprise B2B integrations implement at least three:
+
+| Layer | Mechanism | What It Prevents |
+|-------|-----------|-----------------|
+| **Network** | IP allowlisting (load balancer) | Connections from unknown sources |
+| **Transport** | TLS 1.3 + mTLS client certificate | Eavesdropping, unauthorized TLS connections |
+| **Request integrity** | HMAC signing + 5-minute timestamp window | Replay attacks, request body tampering |
+| **Identity** | Partner API key (HMAC-SHA256 hashed in DB) | Unauthorized API access |
+| **Authorization** | Scopes + tenant isolation | Cross-partner data leakage, privilege escalation |
+| **Audit** | Immutable append-only logs | Undetected misuse, compliance gaps |
+
+```
+Minimum viable B2B security:  TLS + API key + HMAC request signing + audit logs
+Full enterprise security:     TLS + mTLS + IP allowlist + HMAC signing + API key + audit logs
+```
+
+---
+
 ## Audit Logging
 
 Enterprise partners require an immutable audit trail of all API activity for compliance.
@@ -262,11 +472,21 @@ Enterprise partners require an immutable audit trail of all API activity for com
 
 ## Partner Onboarding Checklist
 
-### Authentication
+### Authentication & Request Integrity
 - [ ] Issue per-partner API keys (never shared across partners)
-- [ ] Hash keys before storing — never store plaintext
+- [ ] Hash keys before storing — never store plaintext (HMAC-SHA256 of the key)
+- [ ] Issue a separate HMAC signing secret per partner (not the same as the API key)
 - [ ] Support two active keys per partner (key rotation without downtime)
+- [ ] Enforce 5-minute timestamp window on all HMAC-signed requests (replay protection)
+- [ ] Always verify HMAC with `MessageDigest.isEqual()` — never `String.equals()` (timing attack)
 - [ ] Set up alerting on sustained 401s per partner
+
+### Transport & Network
+- [ ] Enforce TLS 1.2+ on all endpoints (prefer TLS 1.3)
+- [ ] mTLS for high-compliance partners (HIPAA, PCI-DSS)
+- [ ] Collect partner egress IP ranges at onboarding
+- [ ] Enforce IP allowlist at the load balancer layer, not in application code
+- [ ] Treat IP range updates as approved change requests, not self-service
 
 ### Data Access
 - [ ] Enforce tenant isolation on every DB query (`WHERE partner_id = ?`)
