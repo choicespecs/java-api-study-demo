@@ -1576,6 +1576,20 @@ function partnerApiPage() {
     </div>
 
     <div class="card">
+      <div class="card-title">Why API Keys Alone Are Not Enough</div>
+      <div class="text-sm" style="margin-bottom:10px">An API key in a header proves the caller <em>knows the key</em> — it does not prove the request was not tampered with, is not a replay, or came from an authorized source. Real B2B integrations layer multiple mechanisms on top of the API key.</div>
+      <table class="comparison-table">
+        <thead><tr><th>Risk</th><th>What Happens</th><th>Mitigation</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Key leakage</strong></td><td>Partner embeds key in source code or CI/CD logs — compromised without a breach of your system</td><td>HMAC signing: knowing the key alone is not enough without the signing secret</td></tr>
+          <tr><td><strong>Replay attack</strong></td><td>Attacker captures a valid request and resends it unchanged — the API key is still valid</td><td>HMAC + timestamp: server rejects requests where <code>|now − timestamp| &gt; 300s</code></td></tr>
+          <tr><td><strong>Body tampering</strong></td><td>Body is modified in transit; the key header is preserved — the API key covers identity, not payload integrity</td><td>HMAC signs the full request body — any modification invalidates the signature</td></tr>
+          <tr><td><strong>Impersonation</strong></td><td>Any client that learns the key can call your API — the key proves knowledge of a secret, not caller identity</td><td>mTLS: client must present a certificate at the TLS handshake level</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="card">
       <div class="card-title">Select Partner Key</div>
       <div class="flex gap-16" style="flex-wrap:wrap;align-items:flex-end">
         <div class="form-row" style="margin:0;flex:1;min-width:240px">
@@ -1589,7 +1603,8 @@ function partnerApiPage() {
         </div>
       </div>
       <div class="text-sm text-muted mt-8">
-        All requests below use this key. Switch keys to see how tier affects scopes, quota, and data access.
+        All requests below use this key. Switch keys to see how tier affects scopes, quota, and data access.<br>
+        <strong>Note:</strong> In production each request would also carry <code>X-Timestamp</code> and <code>X-Signature</code> (HMAC-SHA256) headers. The interactive demos here focus on partner key auth, tenant isolation, and scope enforcement — see the HMAC section below for the signing pattern.
       </div>
     </div>
 
@@ -1695,29 +1710,104 @@ function partnerApiPage() {
     </div>
 
     <div class="card">
+      <div class="card-title">HMAC Request Signing</div>
+      <div class="text-sm" style="margin-bottom:10px">
+        Partners sign every inbound request with <strong>HMAC-SHA256</strong> using a shared signing secret (separate from the API key). The server recomputes the signature independently and rejects mismatches — without the secret the signature cannot be forged.
+      </div>
+      <table class="comparison-table">
+        <thead><tr><th>Header</th><th>Value</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr><td><code>X-Partner-Key</code></td><td><code>partner-alpha-key-12345</code></td><td>Identifies the partner organization</td></tr>
+          <tr><td><code>X-Timestamp</code></td><td><code>1704067200</code> (Unix epoch)</td><td>Binds the signature to this moment; server rejects <code>|now − ts| &gt; 300s</code></td></tr>
+          <tr><td><code>X-Signature</code></td><td><code>sha256=a7f3d2b1...</code></td><td>HMAC-SHA256 of <code>METHOD\nPATH\nTIMESTAMP\nSHA256(body)</code></td></tr>
+        </tbody>
+      </table>
+      <div class="text-sm text-muted" style="margin-top:8px">
+        The signed canonical string covers the HTTP method, path, timestamp, and a hash of the request body. Any modification to the body changes its SHA-256 hash, which changes the HMAC output — a man-in-the-middle cannot tamper without the secret. Always use <code>MessageDigest.isEqual()</code> for constant-time comparison; <code>String.equals()</code> is vulnerable to timing attacks. See <code>docs/10-partner-integration.md</code> for the full Java server-side implementation.
+      </div>
+    </div>
+
+    <div class="demo-grid">
+      <div class="card">
+        <div class="card-title">Mutual TLS (mTLS)</div>
+        <table class="comparison-table" style="margin-bottom:8px">
+          <thead><tr><th></th><th>Standard TLS</th><th>Mutual TLS</th></tr></thead>
+          <tbody>
+            <tr><td>Server cert</td><td>✓</td><td>✓</td></tr>
+            <tr><td>Client cert</td><td>✗</td><td>✓ — signed by your CA</td></tr>
+            <tr><td>Enforced at</td><td>TLS handshake</td><td>TLS handshake (before your code runs)</td></tr>
+            <tr><td>Revocation</td><td>N/A</td><td>CRL / OCSP — immediate, no deploy</td></tr>
+          </tbody>
+        </table>
+        <div class="text-sm text-muted">
+          Partners present a client certificate on every connection. The API gateway rejects connections without a valid cert before a single HTTP byte reaches your application. Use for high-compliance environments (PCI-DSS, HIPAA).
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">IP Allowlisting</div>
+        <div class="text-sm" style="line-height:1.9">
+          Partners register egress IP ranges at onboarding. Requests from unregistered IPs are rejected at the <strong>load balancer</strong> — before authentication is even attempted.<br><br>
+          <strong>Rules:</strong>
+          <ul style="padding-left:16px;line-height:2;margin-top:4px">
+            <li>Require static egress IPs (NAT gateway), not developer workstation IPs</li>
+            <li>Treat IP range updates as approved change requests — never self-service</li>
+            <li>Combine with API key + HMAC: a stolen key from an unregistered IP still returns 403</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-title">Defense in Depth — Layered Security</div>
+      <table class="comparison-table">
+        <thead><tr><th>Layer</th><th>Mechanism</th><th>What It Prevents</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Network</strong></td><td>IP allowlisting (load balancer)</td><td>Connections from unknown sources</td></tr>
+          <tr><td><strong>Transport</strong></td><td>TLS 1.3 + mTLS client certificate</td><td>Eavesdropping, unauthorized TLS connections</td></tr>
+          <tr><td><strong>Request integrity</strong></td><td>HMAC signing + 5-min timestamp window</td><td>Replay attacks, request body tampering</td></tr>
+          <tr><td><strong>Identity</strong></td><td>Partner API key (HMAC-SHA256 hashed in DB)</td><td>Unauthorized API access</td></tr>
+          <tr><td><strong>Authorization</strong></td><td>Scopes + tenant isolation per partner</td><td>Cross-partner data leakage, privilege escalation</td></tr>
+          <tr><td><strong>Audit</strong></td><td>Immutable append-only logs</td><td>Undetected misuse, compliance gaps</td></tr>
+        </tbody>
+      </table>
+      <div class="text-sm text-muted" style="margin-top:8px">
+        <strong>Minimum viable B2B security:</strong> TLS + API key + HMAC signing + audit logs.<br>
+        <strong>Full enterprise security:</strong> all of the above + mTLS + IP allowlisting.
+      </div>
+    </div>
+
+    <div class="card">
       <div class="card-title">Partner Onboarding Checklist</div>
       <div class="triple-grid" style="gap:12px">
         <div>
-          <div class="text-sm" style="font-weight:600;margin-bottom:6px">Authentication</div>
+          <div class="text-sm" style="font-weight:600;margin-bottom:6px">Authentication &amp; Signing</div>
           <ul class="text-sm text-muted" style="padding-left:18px;line-height:2">
             <li>Issue per-partner API keys (not shared)</li>
             <li>Hash keys in DB — never store plaintext</li>
             <li>Support 2 active keys per partner (rotation)</li>
-            <li>Alert ops on sustained 401s from a partner</li>
+            <li>Issue a separate HMAC signing secret per partner</li>
+            <li>Enforce 5-min timestamp window on signed requests</li>
+            <li>Use constant-time comparison for signature verification</li>
+            <li>Alert ops on sustained 401s from any partner</li>
           </ul>
         </div>
         <div>
-          <div class="text-sm" style="font-weight:600;margin-bottom:6px">Data &amp; Access</div>
+          <div class="text-sm" style="font-weight:600;margin-bottom:6px">Transport &amp; Network</div>
+          <ul class="text-sm text-muted" style="padding-left:18px;line-height:2">
+            <li>Enforce TLS 1.2+ on all endpoints (prefer 1.3)</li>
+            <li>mTLS for high-compliance partners (HIPAA, PCI-DSS)</li>
+            <li>Collect partner egress IP ranges at onboarding</li>
+            <li>Enforce IP allowlist at the load balancer layer</li>
+            <li>Treat IP range updates as approved change requests</li>
+          </ul>
+        </div>
+        <div>
+          <div class="text-sm" style="font-weight:600;margin-bottom:6px">Data, Contracts &amp; Reliability</div>
           <ul class="text-sm text-muted" style="padding-left:18px;line-height:2">
             <li>Enforce tenant isolation on every query</li>
             <li>Assign scopes at provisioning, not per-request</li>
             <li>Provide a sandbox environment with test data</li>
             <li>Separate prod and sandbox keys</li>
-          </ul>
-        </div>
-        <div>
-          <div class="text-sm" style="font-weight:600;margin-bottom:6px">Contracts &amp; Reliability</div>
-          <ul class="text-sm text-muted" style="padding-left:18px;line-height:2">
             <li>Deprecation header on every old-version response</li>
             <li>Sunset date ≥ 6 months out (12 for enterprise)</li>
             <li>Sign outbound webhooks with per-partner secret</li>
