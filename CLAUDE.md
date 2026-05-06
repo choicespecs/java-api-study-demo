@@ -122,5 +122,6 @@ Each concept has a corresponding doc in `docs/`:
 | `docs/10-partner-integration.md` | B2B partner API: partner keys, tenant isolation, tiered limits, deprecation, outbound webhooks |
 | `docs/11-common-problems.md` | CORS, N+1 queries, idempotency, and other frequent mistakes |
 | `docs/12-write-operations.md` | POST/PUT/PATCH/DELETE design: idempotency, retry strategy, conflict handling, optimistic locking |
+| `docs/13-versioning.md` | Versioning strategies, breaking vs. non-breaking changes, sunset lifecycle, partial adoption, coexistence cost, Q&A |
 
-**Self-documenting controllers (no separate doc):** `VersioningController.java` (inline comments cover all four strategies) and `ErrorDemoController.java` + `GlobalExceptionHandler.java` (heavily commented, RFC 7807).
+**Self-documenting controllers (no separate doc):** `ErrorDemoController.java` + `GlobalExceptionHandler.java` (heavily commented, RFC 7807).

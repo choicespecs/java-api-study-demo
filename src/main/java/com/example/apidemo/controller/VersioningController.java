@@ -2,6 +2,7 @@ package com.example.apidemo.controller;
 
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.tags.Tag;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -44,15 +45,21 @@ public class VersioningController {
     @GetMapping("/api/v1/items")
     @Operation(summary = "V1 items (URI versioning)", description = "Version embedded in the URL path")
     public ResponseEntity<Map<String, Object>> v1Items() {
-        return ResponseEntity.ok(Map.of(
-                "version", "1",
-                "strategy", "URI Path: /api/v1/items",
-                "items", java.util.List.of(
-                        Map.of("id", 1, "name", "Widget A", "price", 9.99),
-                        Map.of("id", 2, "name", "Widget B", "price", 19.99)
-                ),
-                "note", "V1: price is a float. V2 changed it to an object with currency."
-        ));
+        return ResponseEntity.ok()
+                .header("Deprecation", "true")
+                .header("Sunset", "Sat, 01 Jul 2026 00:00:00 GMT")
+                .header("Link", "</api/v2/items>; rel=\"successor-version\"")
+                .header("X-API-Version", "v1")
+                .body(Map.of(
+                        "version", "1",
+                        "strategy", "URI Path: /api/v1/items",
+                        "items", java.util.List.of(
+                                Map.of("id", 1, "name", "Widget A", "price", 9.99),
+                                Map.of("id", 2, "name", "Widget B", "price", 19.99)
+                        ),
+                        "note", "V1: price is a float. V2 changed it to an object with currency.",
+                        "warning", "This endpoint is deprecated and will be retired on 2026-07-01. Migrate to /api/v2/items."
+                ));
     }
 
     @GetMapping("/api/v2/items")
@@ -69,6 +76,35 @@ public class VersioningController {
                 ),
                 "breaking_change", "price changed from float to {amount, currency} object",
                 "why_versioned", "V1 clients would break if price changed structure in-place"
+        ));
+    }
+
+    // ── STRATEGY 1b: 410 GONE (POST-SUNSET EXAMPLE) ────────────────
+
+    /**
+     * Simulates a fully sunset endpoint — returns 410 Gone.
+     *
+     * 410 (not 404) signals "this resource existed but was intentionally removed."
+     * 404 would suggest the URL was always wrong; 410 tells the client to stop retrying
+     * and follow the migration link instead.
+     *
+     * Include a migration URL in the response body so clients know where to go.
+     */
+    @GetMapping("/api/v0/items")
+    @Operation(
+            summary = "V0 items — 410 Gone (post-sunset)",
+            description = "Demonstrates what to return after a version has been fully retired. Always 410, not 404."
+    )
+    public ResponseEntity<Map<String, Object>> v0Items() {
+        return ResponseEntity.status(HttpStatus.GONE).body(Map.of(
+                "type",           "/errors/gone",
+                "title",          "Gone",
+                "status",         410,
+                "detail",         "API v0 was retired on 2025-01-01. Migrate to /api/v2/items.",
+                "migrationGuide", "https://docs.example.com/migration/v0-to-v2",
+                "sunset",         "2025-01-01T00:00:00Z",
+                "lesson",         "Return 410 Gone (not 404) when an endpoint is intentionally retired. " +
+                                  "404 implies the URL was always wrong. 410 says: this existed, it was removed, stop retrying, migrate here."
         ));
     }
 
