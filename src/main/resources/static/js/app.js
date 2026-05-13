@@ -1076,6 +1076,50 @@ function oauthPage() {
       This app is both the <strong>Authorization Server</strong> (issues tokens) and the <strong>Resource Server</strong> (validates them).
     </div>
 
+    <div class="section-heading">Why OAuth2?</div>
+    <div class="demo-grid">
+      <div class="card">
+        <div class="card-title" style="color:var(--green)">Benefits</div>
+        <ul class="text-sm" style="padding-left:18px;line-height:2.2">
+          <li><strong>No password sharing</strong> — your credentials never leave the authorization server; third-party apps only see short-lived tokens</li>
+          <li><strong>Scoped access</strong> — tokens carry explicit permissions (<code>read</code>, <code>write</code>, <code>admin</code>); an app can only do what it was granted</li>
+          <li><strong>Short-lived tokens</strong> — access tokens expire in minutes/hours, limiting the blast radius of a leaked token</li>
+          <li><strong>Revocable</strong> — tokens can be invalidated server-side instantly without requiring a password change</li>
+          <li><strong>Separation of concerns</strong> — authentication (who are you?) and authorization (what can you do?) are handled by dedicated services (Auth0, Okta, Keycloak)</li>
+          <li><strong>Industry standard</strong> — every major platform (Google, GitHub, AWS) speaks OAuth2; your integration pattern is reusable</li>
+          <li><strong>Delegated access without impersonation</strong> — a token proves a user <em>authorized</em> an action, not that someone logged in as them</li>
+        </ul>
+      </div>
+      <div class="card">
+        <div class="card-title" style="color:var(--red)">Drawbacks</div>
+        <ul class="text-sm" style="padding-left:18px;line-height:2.2">
+          <li><strong>Complexity</strong> — Authorization Code flow has 6+ steps across browser, client, and server; Basic Auth is one round-trip</li>
+          <li><strong>Requires an Authorization Server</strong> — you need a separate service (or embed one like Spring Authorization Server); adds infrastructure cost</li>
+          <li><strong>Extra latency</strong> — Client Credentials flow adds one token request before every fresh session; Auth Code flow is a browser multi-redirect dance</li>
+          <li><strong>Token management overhead</strong> — clients must store, refresh, and rotate tokens; a stale token means a 401 mid-session</li>
+          <li><strong>Harder to debug</strong> — opaque tokens offer no visibility; even JWTs require a JWKS endpoint and signature verification to inspect</li>
+          <li><strong>Overkill for simple cases</strong> — if your API is internal, single-tenant, or has a handful of trusted clients, API keys or mutual TLS are simpler and equally secure</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-title">OAuth2 vs Other Auth Methods</div>
+      <table class="comparison-table">
+        <thead><tr><th>Method</th><th>Best for</th><th>Password exposed?</th><th>Revocable?</th><th>Scoped?</th><th>Complexity</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Basic Auth</strong></td><td>Internal tools, server-to-server with TLS</td><td class="con">Every request</td><td class="con">No (change pwd)</td><td class="con">No</td><td class="pro">Minimal</td></tr>
+          <tr><td><strong>API Key</strong></td><td>Developer-facing APIs, simple clients</td><td class="con">Every request</td><td class="pro">Yes (key rotation)</td><td class="con">Rarely</td><td class="pro">Low</td></tr>
+          <tr><td><strong>JWT (custom)</strong></td><td>Stateless microservices, mobile apps</td><td class="pro">Never</td><td class="con">Hard (blocklist)</td><td class="pro">Yes (claims)</td><td>Medium</td></tr>
+          <tr><td><strong>OAuth2</strong></td><td>Third-party delegation, public-facing APIs</td><td class="pro">Never</td><td class="pro">Yes (server-side)</td><td class="pro">Yes (scopes)</td><td class="con">High</td></tr>
+          <tr><td><strong>mTLS</strong></td><td>Zero-trust service mesh, partner APIs</td><td class="pro">Never</td><td class="pro">Yes (cert revoke)</td><td class="con">No</td><td class="con">High</td></tr>
+        </tbody>
+      </table>
+      <div class="alert alert-info text-sm" style="margin-top:12px">
+        <strong>Rule of thumb:</strong> reach for OAuth2 when a user is granting a third-party app access to their data, or when you need fine-grained scope control across multiple resource servers. For internal M2M with no user, API keys or mTLS are often simpler.
+      </div>
+    </div>
+
     <div class="demo-grid">
       <div class="card">
         <div class="card-title">Flow 1 — Client Credentials (M2M)</div>

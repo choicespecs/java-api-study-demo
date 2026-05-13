@@ -6,6 +6,45 @@ Example: "Login with Google" — Google is the Authorization Server, your app is
 
 ---
 
+## Why OAuth2?
+
+### Benefits
+
+| Benefit | Explanation |
+|---------|-------------|
+| **No password sharing** | Credentials never leave the authorization server. Third-party apps receive short-lived tokens, not your password. |
+| **Scoped access** | Tokens carry explicit permissions (`read`, `write`, `admin`). An app cannot exceed what the user granted — even if compromised. |
+| **Short-lived tokens** | Access tokens expire in minutes or hours. A leaked token has a narrow window of usefulness. |
+| **Revocable** | Tokens can be invalidated server-side instantly — no password reset required. |
+| **Delegated access without impersonation** | A token proves a user *authorized* an action; it does not grant full account access. |
+| **Separation of concerns** | Authentication ("who are you?") and authorization ("what can you do?") are handled by dedicated services like Auth0, Okta, or Keycloak — not your app. |
+| **Industry standard** | Every major platform (Google, GitHub, AWS, Stripe) speaks OAuth2. Learn it once, integrate anywhere. |
+
+### Drawbacks
+
+| Drawback | Explanation |
+|----------|-------------|
+| **Complexity** | Authorization Code flow has 6+ steps across browser, client, and server. Basic Auth is one round-trip. |
+| **Requires an Authorization Server** | You need a dedicated service or embedded server (e.g. Spring Authorization Server). Adds infrastructure cost and a new failure point. |
+| **Extra latency** | Client Credentials flow adds a token request before every fresh session. Auth Code flow involves multiple browser redirects. |
+| **Token management overhead** | Clients must store, refresh, and rotate tokens. A stale token causes a 401 mid-session. |
+| **Harder to debug** | Opaque tokens reveal nothing. JWTs require JWKS lookup and signature verification to inspect. |
+| **Overkill for simple cases** | Internal, single-tenant APIs with a handful of trusted clients are often better served by API keys or mTLS. |
+
+### OAuth2 vs Other Auth Methods
+
+| Method | Best for | Password exposed? | Revocable? | Scoped? | Complexity |
+|--------|----------|-------------------|-----------|---------|------------|
+| Basic Auth | Internal tools, server-to-server over TLS | Every request | No (change password) | No | Minimal |
+| API Key | Developer-facing APIs, simple clients | Every request | Yes (key rotation) | Rarely | Low |
+| JWT (custom) | Stateless microservices, mobile apps | Never | Hard (requires blocklist) | Yes (claims) | Medium |
+| **OAuth2** | **Third-party delegation, public-facing APIs** | **Never** | **Yes (server-side)** | **Yes (scopes)** | **High** |
+| mTLS | Zero-trust service mesh, partner APIs | Never | Yes (cert revocation) | No | High |
+
+**Rule of thumb:** reach for OAuth2 when a user is granting a third-party app access to their data, or when you need fine-grained scope control across multiple resource servers. For internal M2M with no user involved, API keys or mTLS are often simpler and equally secure.
+
+---
+
 ## Roles in OAuth2
 
 | Role | Description | In this demo |
