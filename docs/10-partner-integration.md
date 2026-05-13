@@ -243,28 +243,150 @@ Use a **per-partner secret** (not a global secret). If one partner's secret is c
 
 ## HMAC Request Signing
 
-Partners sign every inbound request with HMAC-SHA256 using a shared signing secret. The server recomputes the expected signature and rejects any mismatch. This is distinct from outbound webhook signing (Pattern 5) — here, *partners sign their requests to you*.
+An API key in a header answers one question: **"Who are you?"**
+It does not answer: *"Did you intend to send exactly this request, right now, unmodified?"*
+HMAC signing adds that second guarantee. The two work as a pair — neither is sufficient alone.
 
-### What Gets Signed
+---
 
+### The Two-Credential System
+
+Partners are provisioned with **two separate credentials** at onboarding:
+
+| | API Key | Signing Secret |
+|--|---------|---------------|
+| **Purpose** | Identity — "this is Alpha Corp" | Integrity — "Alpha Corp sent this exact request right now" |
+| **Sent in every request?** | Yes — in `X-Partner-Key` header | **Never** — stays on disk at both ends, never transmitted |
+| **What an attacker gets if stolen** | Can impersonate Alpha Corp | Useless alone — needs the API key too, plus a target request to sign |
+| **What it proves** | Caller knows the key | Caller possesses the secret AND computed the signature over this exact content |
+| **Rotated independently?** | Yes | Yes — rotating the signing secret does not affect the API key |
+
+> **Key insight:** The signing secret is a *pre-shared secret* — like a passphrase both sides agreed on before the conversation started. Because it is never in a request, an attacker who captures your network traffic cannot obtain it. They can see the API key; they can never see the signing secret.
+
+---
+
+### What HMAC Actually Computes — Step by Step
+
+HMAC stands for **Hash-based Message Authentication Code**. It is a keyed hash — it produces a fingerprint of your message that only someone who knows the secret key can reproduce.
+
+**Step 1 — Build the canonical string** (the exact bytes that will be signed):
 ```
-Canonical string: METHOD + "\n" + PATH + "\n" + TIMESTAMP + "\n" + SHA256(rawBody)
-
-Example:
 POST
 /api/partner/orders
 1704067200
 ba7816bf8f01cfea414140de5dae2ec73b00361bbef0469df84c6a2d3a6afbe
 ```
+That last line is `SHA-256(rawBody)`. Each component is on its own newline-separated line.
 
-### Why Each Component Matters
+**Step 2 — Feed it into HMAC-SHA256** using the signing secret as the key:
+```
+signature = HMAC-SHA256(key=signingSecret, message=canonicalString)
+```
+Output: a 256-bit (32-byte) value — impossible to predict without the key, even if you know the message.
 
-| Component | Reason |
-|-----------|--------|
-| `METHOD` | Prevents a signed POST from being replayed as a GET on the same path |
-| `PATH` | Prevents cross-endpoint replay (same body, different endpoint) |
-| `TIMESTAMP` | Replay protection — server rejects `|now − timestamp| > 300s` |
-| `SHA256(body)` | Body tamper detection — any modification to the body changes the hash |
+**Step 3 — Attach to the request:**
+```http
+X-Partner-Key: partner-alpha-key-12345
+X-Timestamp: 1704067200
+X-Signature: sha256=a7f3d2b1c9e4f8a2b3c4d5e6f7a8b9c0...
+```
+
+**Step 4 — Server recomputes independently:**
+The server has its own copy of the signing secret (from DB — never in transit). It builds the same canonical string from the request it received and runs the same HMAC. If the outputs match, the request is authentic and unmodified.
+
+---
+
+### Why Each Component of the Canonical String Matters
+
+| Component | What it locks in | Attack it defeats |
+|-----------|-----------------|-------------------|
+| `METHOD` | The HTTP verb | Cannot replay a signed GET as a POST to trigger a write |
+| `PATH` | The exact endpoint | Cannot reuse a valid signature for `/orders` on `/admin/orders` |
+| `TIMESTAMP` | Unix seconds at signing time | **Replay attack** — server rejects `\|now − timestamp\| > 300s`. A captured valid request expires in 5 minutes. |
+| `SHA-256(body)` | Cryptographic fingerprint of the full body | **Body tampering** — change one byte (`amount: 99` → `amount: 9999`), the body hash changes, HMAC changes, rejected. |
+
+---
+
+### What Each Attack Steals — And What Stops It
+
+| Attack | What attacker has | What they can do | Why it fails |
+|--------|------------------|-----------------|-------------|
+| Steal API key only | API key from leaked env var / logs | Try to call the API | Cannot produce `X-Signature` without the signing secret — 401 |
+| Intercept a request | Full request with valid API key + signature | Replay the exact request | Timestamp is baked into the signature; after 5 min the server rejects it |
+| Modify intercepted request | Full request in transit | Change `amount: 99` to `amount: 9999` | Body change alters SHA-256(body), alters HMAC — server sees mismatch, 401 |
+| Steal signing secret only | Signing secret but no API key | Nothing | Server needs both identity (API key) + integrity (signature) |
+| Steal both credentials | API key + signing secret | Full impersonation | No defense from HMAC alone — mTLS + IP allowlisting are the next layer |
+
+---
+
+### One Subtle Rule: Constant-Time Comparison
+
+When comparing the expected signature against the received signature, **never use `String.equals()`**.
+
+`String.equals()` returns `false` as soon as it finds the first differing character — meaning it returns *faster* when strings differ at position 0 than at position 30. An attacker can measure this timing difference across thousands of requests and brute-force the correct signature one byte at a time. This is a **timing attack**.
+
+`MessageDigest.isEqual()` always compares all bytes regardless of the first mismatch — it takes the same time whether the strings match at byte 0 or byte 31. This eliminates the timing signal.
+
+```java
+// ✗ Vulnerable to timing attack
+if (expected.equals(incoming)) { ... }
+
+// ✓ Constant-time — always compare all bytes
+if (MessageDigest.isEqual(expected.getBytes(), incoming.getBytes())) { ... }
+```
+
+---
+
+### Client-Side Signing (Java)
+
+```java
+// Step 1: hash the raw body (before any JSON parsing)
+String rawBody = objectMapper.writeValueAsString(orderRequest);
+String bodyHash = sha256Hex(rawBody);
+
+// Step 2: build the canonical string
+long ts = Instant.now().getEpochSecond();
+String canonical = "POST\n"
+    + "/api/partner/orders\n"
+    + ts + "\n"
+    + bodyHash;
+
+// Step 3: compute HMAC-SHA256 with the signing secret
+//   signingSecret is NEVER sent in the request — pre-shared at onboarding
+String signature = "sha256=" + hmacSha256(signingSecret, canonical);
+
+// Step 4: attach to the request
+HttpRequest request = HttpRequest.newBuilder()
+    .header("X-Partner-Key",  partnerKey)    // identity
+    .header("X-Timestamp",    String.valueOf(ts))
+    .header("X-Signature",    signature)      // proof of intent
+    .header("Content-Type",   "application/json")
+    .POST(HttpRequest.BodyPublishers.ofString(rawBody))
+    .build();
+```
+
+### Common Mistakes
+
+```
+✗ Signing the parsed/re-serialized body instead of rawBody
+  → JSON parsers may normalize whitespace or key order → hash differs → 401
+  → Always sign the raw bytes you are about to send
+
+✗ Using the API key itself as the signing secret
+  → Both credentials are now in every request
+  → Attacker who captures the X-Partner-Key header gets both at once
+  → Use a separate, independently rotatable signing secret
+
+✗ Not including the body hash for GET requests
+  → GET requests have no body, but still include PATH and TIMESTAMP
+  → Use SHA-256("") = e3b0c44298fc1c149afb for empty body, or omit body hash component for GETs
+
+✗ Clock drift
+  → Servers and clients must be NTP-synchronized
+  → A 5-minute window accommodates typical drift; wider windows reduce replay protection
+```
+
+---
 
 ### Server-Side Verification (Java)
 
