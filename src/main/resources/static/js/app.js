@@ -174,7 +174,9 @@ window.addEventListener('hashchange', () => {
 // ── RENDER ENGINE ─────────────────────────────────────────────
 const pages = {
   home, 'auth-jwt': authJwt, 'auth-basic': authBasic, 'auth-apikey': authApiKey,
-  oauth2: oauthPage, rbac: rbacPage, 'rate-limit': rateLimitPage,
+  oauth2: oauthPage, rbac: rbacPage,
+  abac: abacPage, dac: dacPage, mac: macPage, rebac: rebacPage, acl: aclPage, pbac: pbacPage,
+  'rate-limit': rateLimitPage,
   'circuit-breaker': circuitBreakerPage, 'hanging-apis': hangingApisPage,
   'third-party': thirdPartyPage, 'partner-api': partnerApiPage,
   pagination: paginationPage, versioning: versioningPage, errors: errorsPage,
@@ -375,6 +377,29 @@ const handlers = {
     setHtml('rbac-response', `
       <div class="mb-8"><strong>Logged in as:</strong> <code>${role}</code>
         <span class="tag tag-purple ml-8">${loginRes.body.roles?.join(', ')}</span>
+      </div>
+      ${responseViewer(res, `GET ${endpoint}`)}
+    `);
+  },
+
+  // ── ABAC TEST
+  async abacTest(btn) {
+    const role = val('abac-role') || 'user';
+    const target = val('abac-target') || 'user';
+    setLoading(btn, true);
+    const loginRes = await apiFetch('/api/auth/login', {
+      method: 'POST', noJwt: true,
+      body: JSON.stringify({ username: role, password: 'password' })
+    });
+    if (!loginRes.ok) { setLoading(btn, false); return; }
+    const token = loginRes.body.accessToken;
+    const endpoint = `/api/rbac/method-security/my-data/${target}`;
+    const res = await apiFetch(endpoint, { noJwt: true, headers: { Authorization: `Bearer ${token}` } });
+    setLoading(btn, false);
+    setHtml('abac-request', requestViewer('GET', endpoint, { Authorization: `Bearer ${token}` }));
+    setHtml('abac-response', `
+      <div class="mb-8"><strong>Requester:</strong> <code>${role}</code> &nbsp; <strong>Target userId:</strong> <code>${target}</code>
+        &nbsp; <span class="tag ${res.status === 200 ? 'tag-green' : 'tag-red'}">${res.status === 200 ? '200 OK — ABAC allowed' : '403 Forbidden — ABAC denied'}</span>
       </div>
       ${responseViewer(res, `GET ${endpoint}`)}
     `);
@@ -1241,272 +1266,567 @@ function rbacPage() {
     </div>
 
     <div class="divider"></div>
-    <div class="section-heading" style="font-size:18px">Access Control Models Beyond RBAC</div>
-    <div class="alert alert-info text-sm">RBAC is the most common starting point, but five other models handle cases where roles alone are not expressive enough.</div>
-
-    <div class="card" style="margin-bottom:16px">
-      <div class="card-title">Model Comparison at a Glance</div>
-      <table class="comparison-table">
-        <thead><tr><th>Model</th><th>Access granted by</th><th>Best fit</th><th>Real-world examples</th><th>Complexity</th></tr></thead>
-        <tbody>
-          <tr><td><strong>RBAC</strong></td><td>User's assigned role</td><td>Most apps, clear job functions</td><td>Admin panel, CMS, SaaS tiers</td><td>Low</td></tr>
-          <tr><td><strong>ABAC</strong></td><td>Attributes of user, resource &amp; environment</td><td>Fine-grained rules, multi-factor access</td><td>Healthcare records, financial compliance</td><td>Medium</td></tr>
-          <tr><td><strong>DAC</strong></td><td>Resource owner's discretion</td><td>User-generated content with sharing</td><td>Google Drive, Dropbox, S3</td><td>Low–Medium</td></tr>
-          <tr><td><strong>MAC</strong></td><td>System-assigned classification labels</td><td>Government, military, high-security</td><td>SELinux, classified document systems</td><td>High</td></tr>
-          <tr><td><strong>ReBAC</strong></td><td>Graph relationship to the resource</td><td>Social/collaborative data with hierarchies</td><td>Google Docs, GitHub teams, Notion</td><td>High</td></tr>
-          <tr><td><strong>ACL</strong></td><td>Explicit per-resource permission list</td><td>OS-level or per-object control</td><td>Linux filesystem, AWS S3 bucket policies</td><td>Medium</td></tr>
-          <tr><td><strong>PBAC</strong></td><td>Centralized policy engine evaluation</td><td>Multi-service, auditable enterprise policy</td><td>OPA (Open Policy Agent), AWS Cedar</td><td>High</td></tr>
-        </tbody>
-      </table>
+    <div class="card">
+      <div class="card-title">Other Access Control Models</div>
+      <div class="text-sm text-muted" style="margin-bottom:12px">RBAC is the most common starting point — each of these models handles cases where roles alone are not expressive enough.</div>
+      <div class="concept-grid">
+        ${card('🏷️', 'ABAC', 'Grant access based on user, resource, and environment attributes.', 'abac')}
+        ${card('🤲', 'DAC', 'Resource owners decide who can access their own content.', 'dac')}
+        ${card('🔒', 'MAC', 'System-enforced classification labels — no user override.', 'mac')}
+        ${card('🕸️', 'ReBAC', 'Access determined by relationship graph paths.', 'rebac')}
+        ${card('📋', 'ACL', 'Explicit per-resource permission lists.', 'acl')}
+        ${card('📜', 'PBAC', 'Centralized policy engine evaluates declarative rules.', 'pbac')}
+      </div>
     </div>
+  `;
+}
 
-    <div class="section-heading">ABAC — Attribute-Based Access Control</div>
+
+// ── PAGE: ABAC ────────────────────────────────────────────────
+function abacPage() {
+  return `
+    <div class="page-title">🏷️ Attribute-Based Access Control</div>
+    <div class="page-sub">Access decisions based on attributes of the user, resource, and environment.</div>
+
     <div class="concept-box">
       ABAC asks: <strong>"Given everything we know about this user, this resource, and this environment — should access be granted?"</strong><br>
-      Instead of a flat role, the policy engine evaluates <em>attributes</em>: user department, resource owner, data classification, time of day, IP address.
+      Instead of a flat role check, the policy engine evaluates <em>attributes</em>: the user's department, the resource's owner and classification, the time of day, the client's IP address — any combination you define.<br>
+      In Spring Security, ABAC is implemented via <code>@PreAuthorize</code> SpEL expressions.
     </div>
+
+    <div class="demo-grid">
+      <div class="card">
+        <div class="card-title">Three Attribute Dimensions</div>
+        <table class="comparison-table">
+          <thead><tr><th>Dimension</th><th>Example attributes</th></tr></thead>
+          <tbody>
+            <tr><td><strong>Subject</strong> (user)</td><td>department, clearance level, job title, team membership</td></tr>
+            <tr><td><strong>Resource</strong></td><td>owner ID, classification, data type, sensitivity label</td></tr>
+            <tr><td><strong>Environment</strong></td><td>time of day, IP address, device trust, geo-location</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <div class="card-title">ABAC vs RBAC</div>
+        <table class="comparison-table">
+          <thead><tr><th></th><th>RBAC</th><th>ABAC</th></tr></thead>
+          <tbody>
+            <tr><td>Ownership check</td><td class="con">Extra endpoint or code</td><td class="pro">Single attribute expression</td></tr>
+            <tr><td>Time/IP gating</td><td class="con">Custom middleware</td><td class="pro">Environment attribute</td></tr>
+            <tr><td>New permission combo</td><td class="con">New role required</td><td class="pro">New policy expression</td></tr>
+            <tr><td>Audit "who can access X?"</td><td class="pro">Simple role lookup</td><td class="con">Evaluate all users' attrs</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-title">Spring Security — <code>@PreAuthorize</code> Examples</div>
+      <pre class="response-body" style="margin:0">// Owner or admin only
+@PreAuthorize("hasRole('ADMIN') or #userId == authentication.name")
+public ResponseEntity&lt;?&gt; getRecord(@PathVariable String userId) { ... }
+
+// Department attribute match
+@PreAuthorize("hasRole('DOCTOR') and @patientService.isInDept(#id, authentication)")
+public ResponseEntity&lt;?&gt; getPatient(@PathVariable Long id) { ... }
+
+// Time-based environment attribute
+@PreAuthorize("hasRole('USER') and @accessPolicy.isBusinessHours()")
+public ResponseEntity&lt;?&gt; sensitiveData() { ... }</pre>
+    </div>
+
     <div class="demo-grid">
       <div class="card">
         <div class="card-title" style="color:var(--green)">Benefits</div>
         <ul class="text-sm" style="padding-left:18px;line-height:2.2">
-          <li><strong>Extremely fine-grained</strong> — "only doctors in cardiology can read cardiology records during business hours"</li>
-          <li><strong>No role explosion</strong> — RBAC grows a new role every time a new combination of permissions is needed; ABAC encodes that in policy attributes</li>
-          <li><strong>Ownership checks built-in</strong> — <code>resource.ownerId == user.id</code> is a single attribute check</li>
-          <li><strong>Context-aware</strong> — time, IP, and device trust level can gate access dynamically</li>
+          <li><strong>Extremely fine-grained</strong> — "only doctors in cardiology during business hours" is one policy rule</li>
+          <li><strong>No role explosion</strong> — ABAC encodes combinations in attributes, not new roles</li>
+          <li><strong>Ownership checks built-in</strong> — <code>resource.ownerId == user.id</code> is one expression</li>
+          <li><strong>Context-aware</strong> — time, IP, device trust dynamically gate access without code changes</li>
+          <li><strong>Composable with RBAC</strong> — role check + attribute check in one <code>@PreAuthorize</code></li>
         </ul>
       </div>
       <div class="card">
         <div class="card-title" style="color:var(--red)">Drawbacks</div>
         <ul class="text-sm" style="padding-left:18px;line-height:2.2">
-          <li><strong>Policy complexity</strong> — attribute combinations multiply fast; a policy with 5 attributes has hundreds of possible states</li>
-          <li><strong>Hard to audit</strong> — "who can access resource X?" requires evaluating every user's attributes, not a simple role lookup</li>
-          <li><strong>Attribute management overhead</strong> — user and resource attributes must be kept up-to-date or access decisions are stale</li>
+          <li><strong>Policy complexity</strong> — 5 binary attributes = 32 possible states to reason about</li>
+          <li><strong>Hard to audit</strong> — "who can access X?" requires evaluating all users' attributes</li>
+          <li><strong>Attribute staleness</strong> — stale department or role attributes produce wrong access decisions</li>
           <li><strong>Testing difficulty</strong> — covering all attribute combinations in tests is impractical</li>
         </ul>
       </div>
     </div>
-    <div class="card" style="margin-bottom:16px">
-      <div class="card-title">Spring Implementation (<code>@PreAuthorize</code> + SpEL)</div>
-      <pre class="response-body" style="margin:0">@PreAuthorize("hasRole('USER') and #userId == authentication.name")
-public ResponseEntity&lt;?&gt; myData(@PathVariable String userId) { ... }
 
-@PreAuthorize("hasRole('ADMIN') or #userId == authentication.name")
-public ResponseEntity&lt;?&gt; adminOrOwner(@PathVariable String userId) { ... }
+    <div class="card">
+      <div class="card-title">Try It — ABAC Ownership Check</div>
+      <div class="text-sm text-muted mb-8">Tests: <code>user</code> accessing their own data (200) vs another user's data (403).</div>
+      <div class="form-row">
+        <label class="form-label">Login as</label>
+        <select class="form-select" id="abac-role">
+          <option value="user">user (can access own data)</option>
+          <option value="admin">admin (can access any data)</option>
+        </select>
+      </div>
+      <div class="form-row">
+        <label class="form-label">Target userId in path</label>
+        <select class="form-select" id="abac-target">
+          <option value="user">user (own data)</option>
+          <option value="admin">admin (other user's data)</option>
+          <option value="viewer">viewer (other user's data)</option>
+        </select>
+      </div>
+      <button class="btn btn-primary btn-block" data-action="abacTest">Test ABAC →</button>
+      <div class="divider"></div>
+      <div id="abac-request">${requestViewer(null)}</div>
+      <div id="abac-response">${responseViewer(null)}</div>
+    </div>`;
+}
 
-// Time-based attribute via custom bean
-@PreAuthorize("hasRole('USER') and @accessPolicy.isBusinessHours()")
-public ResponseEntity&lt;?&gt; businessHoursOnly() { ... }</pre>
-    </div>
+// ── PAGE: DAC ─────────────────────────────────────────────────
+function dacPage() {
+  return `
+    <div class="page-title">🤲 Discretionary Access Control</div>
+    <div class="page-sub">Resource owners decide who can access their own content.</div>
 
-    <div class="section-heading">DAC — Discretionary Access Control</div>
     <div class="concept-box">
       DAC asks: <strong>"Did the resource owner explicitly grant you access?"</strong><br>
-      The owner of each resource decides who else can read, write, or share it. The system enforces what the owner declares — it does not impose rules from above.
+      The <em>owner</em> of each resource decides who else can read, write, or share it. The system enforces what the owner declares — it does not impose rules from above.<br>
+      This is how <strong>Google Drive, Dropbox, S3 bucket policies, and Linux filesystem permissions</strong> work.
     </div>
+
+    <div class="demo-grid">
+      <div class="card">
+        <div class="card-title">How DAC Works</div>
+        <div class="text-sm" style="line-height:2">
+          <strong>1. Owner creates a resource</strong> → automatically has full control<br>
+          <strong>2. Owner grants permissions</strong> → specifies who can read / write / share<br>
+          <strong>3. Grantee accesses resource</strong> → system checks the permission entry<br>
+          <strong>4. Owner revokes access</strong> → removes the permission entry<br><br>
+          <strong>Permission levels:</strong><br>
+          <span class="tag tag-green">read</span> view only &nbsp;
+          <span class="tag tag-blue">write</span> can edit &nbsp;
+          <span class="tag tag-purple">share</span> can grant others access
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">DAC vs RBAC</div>
+        <table class="comparison-table">
+          <thead><tr><th></th><th>RBAC</th><th>DAC</th></tr></thead>
+          <tbody>
+            <tr><td>Who sets access</td><td>Admin assigns roles</td><td>Resource owner grants directly</td></tr>
+            <tr><td>Granularity</td><td>Role-wide</td><td>Per-resource, per-user</td></tr>
+            <tr><td>Admin required to share?</td><td class="con">Yes</td><td class="pro">No — owner self-serves</td></tr>
+            <tr><td>Central policy enforcement</td><td class="pro">Strong</td><td class="con">Weak — owner can over-share</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <div class="demo-grid">
       <div class="card">
         <div class="card-title" style="color:var(--green)">Benefits</div>
         <ul class="text-sm" style="padding-left:18px;line-height:2.2">
           <li><strong>User autonomy</strong> — owners share resources without needing an admin to update roles</li>
-          <li><strong>Familiar mental model</strong> — "share with…" dialogs in Google Drive and Dropbox are DAC</li>
-          <li><strong>Scales with content</strong> — per-resource permissions don't require new roles as content grows</li>
-          <li><strong>Flexible delegation</strong> — owners can grant others the ability to re-share (can-share vs read-only)</li>
+          <li><strong>Familiar mental model</strong> — every "share with…" dialog in consumer apps is DAC</li>
+          <li><strong>Scales with content</strong> — millions of documents, each with its own permission set</li>
+          <li><strong>Flexible delegation</strong> — owners can grant the right to re-share (write-delegate)</li>
         </ul>
       </div>
       <div class="card">
         <div class="card-title" style="color:var(--red)">Drawbacks</div>
         <ul class="text-sm" style="padding-left:18px;line-height:2.2">
-          <li><strong>Accidental over-sharing</strong> — users often default to "anyone with the link"; data leaks are common</li>
-          <li><strong>No central audit trail</strong> — IT cannot answer "who has access to all files containing PII?"</li>
-          <li><strong>Ownership transfer is messy</strong> — when an employee leaves, orphaned resources may have no owner</li>
-          <li><strong>Inconsistent enforcement</strong> — every resource has its own ACL; a misconfigured one is invisible until exploited</li>
+          <li><strong>Accidental over-sharing</strong> — "anyone with the link" is a DAC failure mode; data leaks are common</li>
+          <li><strong>No central audit trail</strong> — "who has access to PII files?" requires scanning every resource ACL</li>
+          <li><strong>Ownership transfer is messy</strong> — orphaned resources when employees leave</li>
+          <li><strong>Inconsistent enforcement</strong> — a single misconfigured resource ACL is invisible until exploited</li>
         </ul>
       </div>
     </div>
-    <div class="card" style="margin-bottom:16px">
+
+    <div class="card">
       <div class="card-title">Spring ACL Implementation</div>
       <pre class="response-body" style="margin:0">// Requires spring-security-acl dependency
-MutableAcl acl = aclService.createAcl(objectIdentity);
-acl.insertAce(acl.getEntries().size(), BasePermission.READ,
-    new PrincipalSid("bob"), true);
-aclService.updateAcl(acl);
+// Tables: acl_class, acl_object_identity, acl_sid, acl_entry
 
+public void grantPermission(Long resourceId, String username, Permission perm) {
+    ObjectIdentity oi = new ObjectIdentityImpl(Document.class, resourceId);
+    MutableAcl acl = (MutableAcl) aclService.readAclById(oi);
+    acl.insertAce(acl.getEntries().size(), perm, new PrincipalSid(username), true);
+    aclService.updateAcl(acl);
+}
+
+// Enforce in service methods
 @PreAuthorize("hasPermission(#docId, 'com.example.Document', 'read')")
-public Document getDocument(Long docId) { ... }</pre>
-    </div>
+public Document getDocument(Long docId) { ... }
 
-    <div class="section-heading">MAC — Mandatory Access Control</div>
+@PreAuthorize("hasPermission(#docId, 'com.example.Document', 'write')")
+public Document updateDocument(Long docId, DocumentDto dto) { ... }</pre>
+    </div>`;
+}
+
+// ── PAGE: MAC ─────────────────────────────────────────────────
+function macPage() {
+  return `
+    <div class="page-title">🔒 Mandatory Access Control</div>
+    <div class="page-sub">System-enforced classification labels — no user can override them.</div>
+
     <div class="concept-box">
       MAC asks: <strong>"Does the subject's clearance level meet or exceed the resource's classification?"</strong><br>
-      Access decisions are made by the <em>system</em> — no user, including the resource owner, can override them.<br>
-      <strong>Bell-LaPadula rules:</strong> <em>no read up</em> (Secret cannot read Top Secret) · <em>no write down</em> (Top Secret cannot write to Confidential, preventing leakage).
+      Access decisions are made by the <em>system</em> based on labels assigned by administrators — not by resource owners. No user, including the owner, can grant access that exceeds their own clearance.<br>
+      The <strong>Bell-LaPadula model</strong> formalizes two security rules:
+      <span class="tag tag-red">no read up</span> a Secret-cleared user cannot read Top Secret data &nbsp;
+      <span class="tag tag-red">no write down</span> a Top Secret user cannot write to Confidential (prevents leakage downward).
     </div>
+
+    <div class="demo-grid">
+      <div class="card">
+        <div class="card-title">Classification Hierarchy</div>
+        <div class="text-sm" style="line-height:2.4;text-align:center">
+          <div style="padding:6px 12px;background:var(--red);color:#fff;border-radius:4px;margin:4px auto;width:160px"><strong>TOP SECRET</strong> — level 4</div>
+          <div style="padding:6px 12px;background:#f97316;color:#fff;border-radius:4px;margin:4px auto;width:160px"><strong>SECRET</strong> — level 3</div>
+          <div style="padding:6px 12px;background:var(--yellow);color:#1a1a1a;border-radius:4px;margin:4px auto;width:160px"><strong>CONFIDENTIAL</strong> — level 2</div>
+          <div style="padding:6px 12px;background:var(--green);color:#fff;border-radius:4px;margin:4px auto;width:160px"><strong>UNCLASSIFIED</strong> — level 1</div>
+        </div>
+        <div class="text-xs text-muted" style="margin-top:8px;text-align:center">Users can only read resources at or below their clearance level</div>
+      </div>
+      <div class="card">
+        <div class="card-title">MAC vs RBAC vs DAC</div>
+        <table class="comparison-table">
+          <thead><tr><th></th><th>RBAC</th><th>DAC</th><th>MAC</th></tr></thead>
+          <tbody>
+            <tr><td>Who controls access</td><td>Admin (roles)</td><td>Resource owner</td><td>System (labels)</td></tr>
+            <tr><td>User can override?</td><td class="con">No</td><td class="pro">Yes (owner)</td><td class="con">Never</td></tr>
+            <tr><td>Prevents data leakage</td><td>Partial</td><td class="con">Weak</td><td class="pro">Strong guarantee</td></tr>
+            <tr><td>Flexibility</td><td>Medium</td><td class="pro">High</td><td class="con">Very low</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <div class="demo-grid">
       <div class="card">
         <div class="card-title" style="color:var(--green)">Benefits</div>
         <ul class="text-sm" style="padding-left:18px;line-height:2.2">
           <li><strong>Strong guarantees</strong> — classified data cannot leak to lower clearance levels by any user action</li>
+          <li><strong>Prevents insider threats</strong> — a malicious employee cannot downgrade data and exfiltrate it</li>
           <li><strong>Centrally enforced</strong> — the system sets labels; individuals cannot bypass policy, even accidentally</li>
-          <li><strong>Prevents insider threats</strong> — a malicious employee cannot downgrade and exfiltrate data</li>
-          <li><strong>Audit-friendly</strong> — every access attempt is logged against the classification hierarchy</li>
+          <li><strong>Audit-friendly</strong> — every access attempt is logged against the hierarchy with no ambiguity</li>
         </ul>
       </div>
       <div class="card">
         <div class="card-title" style="color:var(--red)">Drawbacks</div>
         <ul class="text-sm" style="padding-left:18px;line-height:2.2">
-          <li><strong>Extremely rigid</strong> — legitimate collaboration across classification levels requires explicit policy changes</li>
-          <li><strong>High administrative overhead</strong> — every resource and user must be assigned and maintained with correct labels</li>
-          <li><strong>Poor fit for most commercial apps</strong> — the complexity is only justified when regulatory or national security requirements demand it</li>
+          <li><strong>Extremely rigid</strong> — legitimate cross-classification collaboration requires system-level policy changes</li>
+          <li><strong>High administrative overhead</strong> — every resource and user must be labelled and maintained</li>
+          <li><strong>Poor fit for most commercial apps</strong> — only justified when regulatory or national security requirements demand it</li>
           <li><strong>User friction</strong> — operations that feel natural in consumer apps (copy-paste, email) are locked down</li>
         </ul>
       </div>
     </div>
-    <div class="card" style="margin-bottom:16px">
-      <div class="card-title">Spring Implementation (Custom <code>AccessDecisionVoter</code>)</div>
+
+    <div class="card">
+      <div class="card-title">Spring Implementation — Custom <code>AccessDecisionVoter</code></div>
       <pre class="response-body" style="margin:0">public class ClearanceVoter implements AccessDecisionVoter&lt;Object&gt; {
+
+    // Clearance levels: UNCLASSIFIED=1, CONFIDENTIAL=2, SECRET=3, TOP_SECRET=4
     public int vote(Authentication auth, Object object,
                     Collection&lt;ConfigAttribute&gt; attrs) {
-        int userLevel = getClearanceLevel(auth);   // UNCLASSIFIED=0, SECRET=2, TOP_SECRET=3
+        int userLevel = getClearanceLevel(auth.getAuthorities());
         int requiredLevel = getRequiredLevel(attrs);
-        return userLevel &gt;= requiredLevel
-            ? ACCESS_GRANTED : ACCESS_DENIED;
+        return userLevel &gt;= requiredLevel ? ACCESS_GRANTED : ACCESS_DENIED;
+    }
+
+    // No-write-down: prevent writing to lower classification
+    public void checkWriteDown(Authentication auth, String targetClassification) {
+        int userLevel = getClearanceLevel(auth.getAuthorities());
+        int targetLevel = parseLevel(targetClassification);
+        if (userLevel &gt; targetLevel)
+            throw new AccessDeniedException("Bell-LaPadula: no-write-down violation");
     }
 }</pre>
-    </div>
+    </div>`;
+}
 
-    <div class="section-heading">ReBAC — Relationship-Based Access Control</div>
+// ── PAGE: REBAC ───────────────────────────────────────────────
+function rebacPage() {
+  return `
+    <div class="page-title">🕸️ Relationship-Based Access Control</div>
+    <div class="page-sub">Access determined by traversing a relationship graph between users and resources.</div>
+
     <div class="concept-box">
       ReBAC asks: <strong>"Does a path exist in the relationship graph from this user to this resource?"</strong><br>
-      Access is determined by traversing an object relationship graph: <code>user → member-of → team → viewer-of → folder → parent-of → document</code>.<br>
-      Google's <strong>Zanzibar</strong> paper (2019) formalized this; <strong>OpenFGA</strong>, <strong>Ory Keto</strong>, and <strong>SpiceDB</strong> are open-source implementations.
+      Instead of roles or attributes, access is determined by graph traversal: <code>user → member-of → team → viewer-of → folder → parent-of → document</code>.<br>
+      Google's <strong>Zanzibar</strong> paper (2019) formalized this model. Open-source implementations: <strong>OpenFGA</strong>, <strong>Ory Keto</strong>, <strong>SpiceDB</strong>.
     </div>
+
+    <div class="demo-grid">
+      <div class="card">
+        <div class="card-title">Relationship Graph Example</div>
+        <div class="text-sm" style="line-height:2.2">
+          <strong>Stored tuples (facts):</strong><br>
+          <code>alice  owner   document:report</code><br>
+          <code>bob    viewer  document:report</code><br>
+          <code>bob    member  team:engineering</code><br>
+          <code>team:engineering  viewer  folder:shared</code><br>
+          <code>folder:shared     parent  document:specs</code><br>
+          <br>
+          <strong>Can bob read specs?</strong><br>
+          <code>bob → member → eng → viewer → shared → parent → specs</code> ✓
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">ReBAC vs RBAC</div>
+        <table class="comparison-table">
+          <thead><tr><th></th><th>RBAC</th><th>ReBAC</th></tr></thead>
+          <tbody>
+            <tr><td>Folder inherits to doc</td><td class="con">Manual/custom</td><td class="pro">parent-of relation</td></tr>
+            <tr><td>"Shared with me"</td><td class="con">Hard to model</td><td class="pro">First-class concept</td></tr>
+            <tr><td>New resource type</td><td>New role set</td><td>New schema type</td></tr>
+            <tr><td>Access check API</td><td>hasRole(user,role)</td><td>check(user,rel,obj)</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <div class="demo-grid">
       <div class="card">
         <div class="card-title" style="color:var(--green)">Benefits</div>
         <ul class="text-sm" style="padding-left:18px;line-height:2.2">
-          <li><strong>Natural for hierarchies</strong> — folder → document → comment inheritance is a first-class concept, not a hack on top of roles</li>
-          <li><strong>Handles "shared with me"</strong> — access via group membership, direct share, or parent object all resolve the same way</li>
-          <li><strong>Consistent API:</strong> <code>check(user, relation, object)</code> answers any access question</li>
-          <li><strong>Scales with data</strong> — adding millions of objects adds tuples, not roles</li>
+          <li><strong>Natural for hierarchies</strong> — folder → document → comment inheritance is first-class, not a workaround</li>
+          <li><strong>Handles "shared with me"</strong> — access via group, direct share, or parent all resolve through the same graph check</li>
+          <li><strong>Consistent API</strong> — <code>check(user, relation, object)</code> answers every access question</li>
+          <li><strong>Scales with data</strong> — adding millions of objects adds tuples, not roles or policy rules</li>
         </ul>
       </div>
       <div class="card">
         <div class="card-title" style="color:var(--red)">Drawbacks</div>
         <ul class="text-sm" style="padding-left:18px;line-height:2.2">
-          <li><strong>Graph traversal cost</strong> — deep hierarchies require multi-hop lookups; Zanzibar uses aggressive caching (Zookies) to compensate</li>
-          <li><strong>Relationship tuple storage</strong> — every (user, relation, object) triple must be stored; large sharing graphs require a dedicated store</li>
+          <li><strong>Graph traversal cost</strong> — deep hierarchies require multi-hop lookups; Zanzibar uses aggressive caching (Zookies)</li>
+          <li><strong>Tuple storage at scale</strong> — every (user, relation, object) triple must be stored in a dedicated store</li>
           <li><strong>Schema design is hard</strong> — getting the authorization model right upfront is critical; renames break existing tuples</li>
-          <li><strong>Operational complexity</strong> — running OpenFGA or SpiceDB is another service to operate</li>
+          <li><strong>Operational complexity</strong> — OpenFGA/SpiceDB is a separate service with its own availability requirements</li>
         </ul>
       </div>
     </div>
-    <div class="card" style="margin-bottom:16px">
-      <div class="card-title">OpenFGA / Zanzibar Tuple Model</div>
-      <pre class="response-body" style="margin:0">// OpenFGA authorization model (schema)
+
+    <div class="card">
+      <div class="card-title">OpenFGA / Zanzibar — Spring Integration</div>
+      <pre class="response-body" style="margin:0">// Authorization model (OpenFGA DSL)
 type document
   relations
     define owner: [user]
     define viewer: [user, team#member] or owner
     define editor: [user] or owner
 
-// Stored tuples
-user:alice  owner   document:report-q3
-user:bob    viewer  document:report-q3
+// Write a tuple (alice owns report-q3)
+WriteRequest write = new WriteRequest().writes(new WriteRequestWrites()
+    .tupleKeys(List.of(new TupleKey()
+        .user("user:alice")._object("document:report-q3").relation("owner"))));
+fgaClient.write(write);
 
-// Spring: check via OpenFGA SDK
-CheckRequest req = new CheckRequest().tupleKey(
-    new TupleKey().user("user:"+name)._object("document:"+id).relation("viewer"));
-boolean allowed = fgaClient.check(req).getAllowed();</pre>
-    </div>
+// Check access (can bob view report-q3?)
+CheckResponse res = fgaClient.check(new CheckRequest()
+    .tupleKey(new TupleKey()
+        .user("user:bob")._object("document:report-q3").relation("viewer")));
+if (!res.getAllowed()) throw new AccessDeniedException("No relationship path found");</pre>
+    </div>`;
+}
 
-    <div class="section-heading">ACL — Access Control Lists</div>
+// ── PAGE: ACL ─────────────────────────────────────────────────
+function aclPage() {
+  return `
+    <div class="page-title">📋 Access Control Lists</div>
+    <div class="page-sub">Each resource carries an explicit list of who can do what to it.</div>
+
     <div class="concept-box">
-      An ACL is a list of <strong>(principal, permission)</strong> pairs attached to each resource.<br>
-      When access is requested, the system looks up the resource's ACL and checks whether the requesting principal has the required permission listed.
-      Linux filesystem permissions (<code>rwxr-xr--</code>) are the most familiar example.
+      An ACL is a list of <strong>(principal, permission)</strong> pairs attached directly to a resource.<br>
+      When access is requested, the system reads the resource's ACL and checks whether the requester has the needed permission listed — no role hierarchy, no graph traversal, just a lookup.<br>
+      Linux filesystem permissions (<code>rwxr-xr--</code>), AWS S3 bucket policies, and database-level GRANTs are all ACL implementations.
     </div>
+
+    <div class="demo-grid">
+      <div class="card">
+        <div class="card-title">ACL Structure</div>
+        <div class="text-sm" style="line-height:2">
+          <strong>Each resource stores:</strong>
+          <table class="cred-table" style="margin-top:8px">
+            <tr><th>Principal</th><th>Permissions</th></tr>
+            <tr><td><code>alice</code></td><td><span class="tag tag-purple">owner</span> <span class="tag tag-blue">read</span> <span class="tag tag-green">write</span> <span class="tag tag-red">delete</span></td></tr>
+            <tr><td><code>bob</code></td><td><span class="tag tag-blue">read</span></td></tr>
+            <tr><td><code>team:finance</code></td><td><span class="tag tag-blue">read</span> <span class="tag tag-green">write</span></td></tr>
+            <tr><td><em>(everyone else)</em></td><td><span class="tag">no access</span></td></tr>
+          </table>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">ACL vs Other Models</div>
+        <table class="comparison-table">
+          <thead><tr><th></th><th>ACL</th><th>RBAC</th><th>ReBAC</th></tr></thead>
+          <tbody>
+            <tr><td>"Who can access this file?"</td><td class="pro">Read its ACL</td><td>Find role holders</td><td>Traverse graph</td></tr>
+            <tr><td>"What can bob access?"</td><td class="con">Scan all ACLs</td><td class="pro">Look up bob's roles</td><td class="pro">Graph query</td></tr>
+            <tr><td>Folder → file inheritance</td><td class="con">Must copy entries</td><td class="con">Extra code</td><td class="pro">Native</td></tr>
+            <tr><td>Scales to millions of files</td><td class="con">Huge tables</td><td class="pro">Yes</td><td class="pro">Yes</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
     <div class="demo-grid">
       <div class="card">
         <div class="card-title" style="color:var(--green)">Benefits</div>
         <ul class="text-sm" style="padding-left:18px;line-height:2.2">
           <li><strong>Per-resource precision</strong> — each object has its own independently configured permission set</li>
           <li><strong>Simple to reason about</strong> — "who has access to this file?" is answered by reading its ACL directly</li>
-          <li><strong>Well-understood</strong> — OS, databases, cloud storage (S3 bucket policies) all implement ACLs; tooling is mature</li>
-          <li><strong>Granular without a graph</strong> — no hierarchy to traverse; the answer is in the list</li>
+          <li><strong>Well-understood and mature</strong> — OS, databases, cloud storage (S3, GCS, Azure) all implement ACLs</li>
+          <li><strong>No extra infrastructure</strong> — ACL entries live next to the resource in your existing database</li>
         </ul>
       </div>
       <div class="card">
         <div class="card-title" style="color:var(--red)">Drawbacks</div>
         <ul class="text-sm" style="padding-left:18px;line-height:2.2">
-          <li><strong>Does not scale</strong> — N resources × M users = enormous ACL tables; querying "what can user X access?" scans every ACL</li>
-          <li><strong>No inheritance</strong> — permissions do not propagate from parent to child unless explicitly copied</li>
-          <li><strong>Stale entries</strong> — when a user is deleted, their ACL entries across all resources must be found and cleaned up</li>
-          <li><strong>Audit complexity</strong> — "what does bob have access to?" requires joining across all resource ACLs</li>
+          <li><strong>Does not scale</strong> — N resources × M users = enormous tables; "what can bob access?" scans every ACL</li>
+          <li><strong>No inheritance</strong> — permissions don't propagate from parent to child without extra code</li>
+          <li><strong>Stale entries accumulate</strong> — deleted users leave orphaned ACL entries across all resources</li>
+          <li><strong>Hard to audit globally</strong> — finding all resources with external contractor access requires joining every ACL</li>
         </ul>
       </div>
     </div>
-    <div class="card" style="margin-bottom:16px">
-      <div class="card-title">Spring Security ACL</div>
-      <pre class="response-body" style="margin:0">// Grant permission
-ObjectIdentity oi = new ObjectIdentityImpl(Document.class, resourceId);
-MutableAcl acl = (MutableAcl) aclService.readAclById(oi);
-acl.insertAce(acl.getEntries().size(), BasePermission.WRITE,
-    new PrincipalSid(username), true);
-aclService.updateAcl(acl);
 
-// Check
-@PreAuthorize("hasPermission(#resourceId, 'com.example.Document', 'write')")
-public void updateDocument(Long resourceId, DocumentDto dto) { ... }</pre>
-    </div>
+    <div class="card">
+      <div class="card-title">Spring Security ACL — Domain Object Permissions</div>
+      <pre class="response-body" style="margin:0">// pom.xml: spring-security-acl + spring-cache
 
-    <div class="section-heading">PBAC — Policy-Based Access Control</div>
+// Grant permission on a specific domain object
+public void grant(Long resourceId, String username, Permission perm) {
+    ObjectIdentity oi = new ObjectIdentityImpl(Document.class, resourceId);
+    MutableAcl acl;
+    try { acl = (MutableAcl) aclService.readAclById(oi); }
+    catch (NotFoundException e) { acl = aclService.createAcl(oi); }
+    acl.insertAce(acl.getEntries().size(), perm, new PrincipalSid(username), true);
+    aclService.updateAcl(acl);
+}
+
+// Revoke
+public void revoke(Long resourceId, String username) {
+    ObjectIdentity oi = new ObjectIdentityImpl(Document.class, resourceId);
+    MutableAcl acl = (MutableAcl) aclService.readAclById(oi);
+    acl.getEntries().stream()
+        .filter(e -&gt; e.getSid().equals(new PrincipalSid(username)))
+        .map(AccessControlEntry::getId)
+        .forEach(acl::deleteAce);
+    aclService.updateAcl(acl);
+}
+
+// Protect endpoints
+@PreAuthorize("hasPermission(#id, 'com.example.Document', 'write')")
+public Document update(Long id, DocumentDto dto) { ... }</pre>
+    </div>`;
+}
+
+// ── PAGE: PBAC ────────────────────────────────────────────────
+function pbacPage() {
+  return `
+    <div class="page-title">📜 Policy-Based Access Control</div>
+    <div class="page-sub">A centralized policy engine evaluates declarative rules at runtime.</div>
+
     <div class="concept-box">
-      PBAC externalizes access decisions to a <strong>policy engine</strong> that evaluates declarative rules at runtime.<br>
-      Your application asks: <code>allowed = engine.evaluate(input)</code>. The engine (OPA, AWS Cedar, Casbin) consults a policy document — not hardcoded logic — and returns a decision.<br>
-      Policies can be updated, versioned, and tested independently of application code.
+      PBAC asks: <strong>"Does the policy engine allow this action given the current input?"</strong><br>
+      Your application sends a structured <em>input</em> (user, resource, action, context) to an external policy engine. The engine evaluates declarative rules and returns <code>allow</code> or <code>deny</code>.<br>
+      The key difference from all other models: <strong>policy logic is decoupled from application code</strong>. It lives in its own files, versioned in Git, and deployable independently of the application.
     </div>
+
+    <div class="demo-grid">
+      <div class="card">
+        <div class="card-title">How PBAC Works</div>
+        <div class="text-sm" style="line-height:2">
+          <strong>1.</strong> Request arrives at your API<br>
+          <strong>2.</strong> App builds structured input (user attrs, resource, action)<br>
+          <strong>3.</strong> App queries policy engine — <code>POST /v1/data/myapp/allow</code><br>
+          <strong>4.</strong> Engine evaluates policy document against the input<br>
+          <strong>5.</strong> Engine returns <code>{"result": true}</code> or <code>{"result": false}</code><br>
+          <strong>6.</strong> App enforces the decision<br><br>
+          <strong>Popular engines:</strong> &nbsp;
+          <span class="tag tag-blue">OPA + Rego</span> &nbsp;
+          <span class="tag tag-green">AWS Cedar</span> &nbsp;
+          <span class="tag tag-purple">Casbin</span>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-title">OPA Rego Policy Example</div>
+        <pre class="response-body" style="margin:0;font-size:11px">package invoice.approval
+
+default allow = false
+
+# Managers approve own dept, up to $50k
+allow {
+    input.user.role == "manager"
+    input.user.dept == input.invoice.dept
+    input.invoice.amount &lt;= 50000
+}
+
+# Finance approves any amount
+allow {
+    input.user.dept == "finance"
+}</pre>
+      </div>
+    </div>
+
     <div class="demo-grid">
       <div class="card">
         <div class="card-title" style="color:var(--green)">Benefits</div>
         <ul class="text-sm" style="padding-left:18px;line-height:2.2">
-          <li><strong>Decoupled from code</strong> — policy changes ship without a code deploy; security teams update rules independently</li>
-          <li><strong>Auditable and version-controlled</strong> — policy files live in Git; every change is a diff, reviewable and traceable</li>
-          <li><strong>Testable in isolation</strong> — policy unit tests run without spinning up the application</li>
-          <li><strong>Consistent across services</strong> — a single OPA sidecar enforces the same policy across 20 microservices</li>
-          <li><strong>Expressive</strong> — OPA's Rego and Cedar can express RBAC, ABAC, and ownership checks in one policy language</li>
+          <li><strong>Decoupled from code</strong> — policy changes ship without a redeploy; security teams update rules independently</li>
+          <li><strong>Auditable and version-controlled</strong> — policy files live in Git; every change is a diff with full history</li>
+          <li><strong>Testable in isolation</strong> — policy unit tests run in milliseconds without spinning up the application</li>
+          <li><strong>Consistent across services</strong> — one OPA sidecar enforces the same policy across all microservices</li>
+          <li><strong>Expressive</strong> — Rego and Cedar can express RBAC, ABAC, and ownership rules in one place</li>
         </ul>
       </div>
       <div class="card">
         <div class="card-title" style="color:var(--red)">Drawbacks</div>
         <ul class="text-sm" style="padding-left:18px;line-height:2.2">
-          <li><strong>New language to learn</strong> — OPA's Rego is non-obvious; Cedar has its own syntax; real onboarding cost</li>
-          <li><strong>Latency</strong> — every access check is an external call; hot paths need caching</li>
-          <li><strong>Operational overhead</strong> — another service to deploy, monitor, and keep in sync with application data</li>
-          <li><strong>Overkill for small teams</strong> — if one team owns all services, hardcoded RBAC with code review is simpler</li>
-          <li><strong>Data synchronization</strong> — the policy engine needs up-to-date user/resource data; stale input → wrong decisions</li>
+          <li><strong>New language to learn</strong> — OPA's Rego uses logic-programming style; real onboarding cost</li>
+          <li><strong>Added latency</strong> — every check is a network call (or in-process library call); hot paths need caching</li>
+          <li><strong>Operational overhead</strong> — a policy engine is a critical path service to deploy, scale, and monitor</li>
+          <li><strong>Data synchronization</strong> — the engine needs fresh user/resource data; stale input → wrong decisions</li>
+          <li><strong>Overkill for small teams</strong> — hardcoded RBAC with code review achieves the same auditability at lower cost</li>
         </ul>
       </div>
     </div>
-    <div class="card" style="margin-bottom:16px">
-      <div class="card-title">OPA (Rego) Policy + Spring Integration</div>
-      <pre class="response-body" style="margin:0">// invoice_approval.rego
-package invoice.approval
-default allow = false
-allow {
-    input.user.role == "manager"
-    input.user.department == input.invoice.department
-    input.invoice.amount &lt;= 50000
-}
-allow { input.user.department == "finance" }
 
-// Spring Boot — call OPA sidecar
-Map&lt;String,Object&gt; body = Map.of("input", Map.of(
-    "user",    Map.of("role", role, "department", dept),
-    "invoice", Map.of("department", inv.getDept(), "amount", inv.getAmount())));
-OpaResponse res = restTemplate.postForObject(
-    "http://opa:8181/v1/data/invoice/approval", body, OpaResponse.class);
-if (!Boolean.TRUE.equals(res.getResult().get("allow")))
-    throw new AccessDeniedException("Policy denied");</pre>
+    <div class="card">
+      <div class="card-title">Spring Boot + OPA Integration</div>
+      <pre class="response-body" style="margin:0">@Component
+public class OpaAuthorizationManager {
+
+    private final RestTemplate restTemplate;
+    private final String opaUrl = "http://opa:8181/v1/data/invoice/approval";
+
+    public boolean isAllowed(Authentication auth, InvoiceDto invoice) {
+        Map&lt;String,Object&gt; input = Map.of(
+            "user", Map.of(
+                "role",  getRole(auth),
+                "dept",  getDept(auth)),
+            "invoice", Map.of(
+                "dept",   invoice.getDepartment(),
+                "amount", invoice.getAmount()));
+
+        OpaResponse res = restTemplate.postForObject(
+            opaUrl, Map.of("input", input), OpaResponse.class);
+
+        return Boolean.TRUE.equals(res.getResult().get("allow"));
+    }
+}
+
+// Use in a controller
+@PostMapping("/invoices/{id}/approve")
+public ResponseEntity&lt;?&gt; approve(@PathVariable Long id) {
+    InvoiceDto inv = invoiceService.findById(id);
+    if (!opaManager.isAllowed(SecurityContextHolder.getContext().getAuthentication(), inv))
+        throw new AccessDeniedException("OPA policy denied");
+    return ResponseEntity.ok(invoiceService.approve(id));
+}</pre>
     </div>`;
 }
 
