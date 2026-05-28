@@ -68,6 +68,109 @@ Real enterprise integrations layer at least three of the mechanisms described in
 
 ---
 
+## Choosing an Auth Method for B2B
+
+B2B integration is **machine-to-machine**: there is no human logging in, no browser, no session. The right auth method depends on what question you need to answer — *"which organization is this?"*, not *"which user is this?"*
+
+### API Keys vs JWT vs OAuth2 — Which to Use and Why
+
+| Method | Designed For | B2B Fit | Why |
+|--------|-------------|---------|-----|
+| **API Key (+ HMAC)** | Machine-to-machine identity | ✅ Best fit | Long-lived, org-scoped, no refresh cycle, simple to embed in server-side code |
+| **OAuth2 `client_credentials`** | Machine-to-machine via token server | ✅ Works — adds complexity | Standard protocol, short-lived tokens (better if stolen), but requires token refresh infrastructure |
+| **JWT (bearer token)** | User session authentication | ❌ Wrong fit | Short-lived, represents a logged-in user — B2B has no user to log in; stateless so immediate revocation requires a blocklist |
+| **OAuth2 auth code flow** | User delegating access to a third party | ❌ Wrong fit | Requires a browser redirect and user consent — no user is present in server-to-server integration |
+| **Basic Auth** | Simple user login | ❌ Wrong fit | Sends credentials on every request, no scopes, no revocation — not suitable for third-party integrations |
+
+---
+
+### Why Not JWT?
+
+JWTs solve a specific problem: **prove to downstream services that a user has already authenticated**, without hitting the auth DB on every request.
+
+In B2B, there is no user authentication event. Alpha Corp's server calls your API 24/7 unattended. A JWT would require:
+
+- A login endpoint the partner's server polls to refresh tokens every 15–60 minutes
+- Handling token expiry mid-integration — suddenly a 401 on a scheduled batch job
+- A distributed token blocklist if you need immediate revocation (the whole point of JWTs is that they're self-contained and stateless, so blocking one requires a blocklist you'd have to check on every request — defeating the statelessness benefit)
+
+```
+Don't use JWT for B2B.
+JWT is a token format — the auth code flow and session context it was designed for
+don't exist in server-to-server calls.
+```
+
+---
+
+### When OAuth2 client_credentials Works
+
+The `client_credentials` grant is the one OAuth2 flow designed for machine-to-machine — no user, no browser. The partner exchanges a `client_id` + `client_secret` for a short-lived access token, then uses that token until it expires:
+
+```
+POST /oauth/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials
+&client_id=machine-client
+&client_secret=machine-secret
+&scope=catalog:read orders:write
+```
+
+```json
+{
+  "access_token": "eyJhbGciOiJSUzI1NiJ9...",
+  "token_type": "Bearer",
+  "expires_in": 3600,
+  "scope": "catalog:read orders:write"
+}
+```
+
+**Advantages over plain API keys:**
+- Access tokens expire — a stolen token has a limited window of misuse
+- Standard protocol — partner's HTTP clients and SDKs may support it out of the box
+- Scopes can be requested dynamically per token, not just provisioned statically
+
+**When to choose it:**
+- You already operate an OAuth2 authorization server (Keycloak, Auth0, Okta)
+- Partners are large enterprises whose tooling already integrates with OAuth2
+- Your threat model requires short-lived credentials
+
+**When to skip it:**
+- Simpler integrations where API key + HMAC signing already meets your threat model
+- Partners are smaller teams who don't want to implement token refresh logic
+- You don't want to operate (or pay for) an auth server
+
+---
+
+### Why API Keys Win for Most B2B
+
+API keys are the dominant choice for B2B because **they match how machine-to-machine calls actually work**:
+
+```
+No token refresh — one credential, always valid until explicitly rotated.
+Partner embeds in an environment variable, calls your API from cron jobs,
+event handlers, queues, and background workers without any interactive step.
+```
+
+| Property | API Key (+ HMAC) | OAuth2 client_credentials |
+|----------|-----------------|--------------------------|
+| Credential lifetime | Long-lived, explicit rotation | Short-lived token, auto-refresh |
+| Token refresh required | No | Yes (every 1–24 hours typically) |
+| Immediate revocation | Yes — mark inactive in DB | Token lives until expiry; refresh can be blocked |
+| Request integrity | HMAC signing (separate signing secret) | Signing requires additional implementation on top |
+| Standard protocol | No — your custom headers | Yes — RFC 6749 |
+| Operational complexity | Low | Medium (requires auth server) |
+
+```
+API key + HMAC signing together provide equivalent security to OAuth2 client_credentials:
+  API key  → answers "who are you?" (identity)
+  HMAC sig → answers "did you send exactly this, right now, unmodified?" (integrity)
+
+No token refresh infrastructure needed.
+```
+
+---
+
 ## Pattern 2: Tenant Isolation
 
 Each partner key scopes all data access to that partner's subset. Partners sharing infrastructure must never see each other's data.
